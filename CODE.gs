@@ -198,14 +198,18 @@ function extraerDesdeTextoEmbebido(contexto) {
       return { ok: false, metodoExtraccion: 'OCR_DRIVE', confianza: 0, observaciones: 'Sin texto extraído' };
     }
 
-    const datos = parseInvoiceData(texto);
+    const datos = parseInvoiceDataGeneric(texto);
+    const validacion = validarResultado(datos);
+    const confianza = calcularConfianza(datos, 'OCR_DRIVE');
+
     return {
-      ok: true,
+      ok: validacion.estado !== 'ERROR_EXTRACCION',
       metodoExtraccion: 'OCR_DRIVE',
-      confianza: 0.75,
+      confianza: confianza,
       textoFuente: texto,
       datos: datos,
-      observaciones: 'Extracción OCR con Drive API'
+      estado: validacion.estado,
+      observaciones: validacion.observaciones
     };
   } catch (err) {
     return {
@@ -293,6 +297,7 @@ function normalizarYValidar(resultado, contexto) {
   const datosBase = resultado.datos || {};
   const proveedor = limpiarTexto(datosBase.proveedor || '');
   const proveedorNormalizado = normalizarProveedor(proveedor);
+  const validacion = validarResultado(datosBase);
 
   const salida = {
     fecha: normalizarFecha(datosBase.fecha),
@@ -303,20 +308,30 @@ function normalizarYValidar(resultado, contexto) {
     cufe: limpiarTexto(datosBase.cufe || contexto.cufeDetectado || ''),
     tipoDocumento: contexto.tipoDocumento,
     metodoExtraccion: resultado.metodoExtraccion || 'N/D',
-    confianza: resultado.confianza || 0,
-    estado: 'OK',
+    confianza: resultado.confianza || calcularConfianza(datosBase, resultado.metodoExtraccion || 'N/D'),
+    estado: resultado.estado || validacion.estado,
     observaciones: resultado.observaciones || '',
     driveFileId: contexto.fileId,
     link: contexto.link
   };
 
-  if (!resultado.ok) {
-    salida.estado = 'PENDIENTE_REVISION';
+  if (contexto.tipoDocumento === 'NO_FISCAL') {
+    salida.estado = 'NO_FISCAL';
+    return salida;
   }
 
-  if (!salida.fecha || !salida.proveedor || !salida.total) {
-    salida.estado = 'PENDIENTE_REVISION';
-    salida.observaciones = anexarObs(salida.observaciones, 'Campos obligatorios incompletos');
+  if (!resultado.ok && salida.estado === 'OK') {
+    salida.estado = 'REVISION_MANUAL';
+  }
+
+  if (!validacion.esValido || validacion.estado !== 'OK') {
+    salida.estado = validacion.estado;
+    salida.observaciones = anexarObs(salida.observaciones, validacion.observaciones);
+  }
+
+  if (salida.confianza < 0.7 && salida.estado === 'OK') {
+    salida.estado = 'REVISION_MANUAL';
+    salida.observaciones = anexarObs(salida.observaciones, 'Confianza baja');
   }
 
   return salida;
@@ -467,6 +482,190 @@ function parseInvoiceData(text) {
   if (cufeMatch) data.cufe = cufeMatch[1].trim();
 
   return data;
+}
+
+function extraerDesdeTextoEmbebido_parseFechas(texto) {
+  const meses = {
+    ENERO: '01', FEBRERO: '02', MARZO: '03', ABRIL: '04', MAYO: '05', JUNIO: '06',
+    JULIO: '07', AGOSTO: '08', SEPTIEMBRE: '09', SETIEMBRE: '09', OCTUBRE: '10', NOVIEMBRE: '11', DICIEMBRE: '12'
+  };
+  const candidatos = [];
+  const t = texto.toUpperCase();
+  let m;
+
+  const patrones = [
+    /(\d{4})[-\/](\d{2})[-\/](\d{2})/g,
+    /(\d{2})[-\/](\d{2})[-\/](\d{4})/g,
+    /(\d{2})\s+DE\s+([A-ZÁÉÍÓÚ]+)\s+DE\s+(\d{4})/g
+  ];
+
+  while ((m = patrones[0].exec(t)) !== null) {
+    candidatos.push(m[1] + '-' + m[2] + '-' + m[3]);
+  }
+  while ((m = patrones[1].exec(t)) !== null) {
+    candidatos.push(m[3] + '-' + m[2] + '-' + m[1]);
+  }
+  while ((m = patrones[2].exec(t)) !== null) {
+    const mes = meses[m[2]] || '';
+    if (mes) candidatos.push(m[3] + '-' + mes + '-' + ('0' + m[1]).slice(-2));
+  }
+
+  for (let i = 0; i < candidatos.length; i++) {
+    const c = candidatos[i];
+    if (/^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(c)) return c;
+  }
+  return '';
+}
+
+function parseInvoiceDataGeneric(text) {
+  const raw = String(text || '');
+  const txt = raw.replace(/\u00A0/g, ' ');
+  const upper = txt.toUpperCase();
+  const data = {
+    fecha: '',
+    proveedor: '',
+    itbms: '',
+    total: '',
+    cufe: '',
+    numeroFactura: '',
+    noFiscalDetectado: textoPareceNoFiscal(upper)
+  };
+
+  data.fecha = extraerDesdeTextoEmbebido_parseFechas(txt);
+
+  const proveedorRegex = /(?:EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL|NOMBRE)\s*:?\s*([^\n\r|]{3,120})/gi;
+  let pm;
+  while ((pm = proveedorRegex.exec(txt)) !== null) {
+    const cand = limpiarTexto(pm[1]).replace(/[:;,.]+$/, '');
+    if (cand && !/\b(RUC|DV|NIT|CUFE|FACTURA)\b/i.test(cand)) {
+      data.proveedor = cand;
+      break;
+    }
+  }
+  if (!data.proveedor) {
+    const lineas = txt.split(/\r?\n/);
+    for (let i = 0; i < Math.min(6, lineas.length); i++) {
+      const l = limpiarTexto(lineas[i]);
+      if (l.length >= 5 && l.length <= 120 && /[A-Za-zÁÉÍÓÚÑ]/.test(l) && !/\d{3,}/.test(l)) {
+        data.proveedor = l;
+        break;
+      }
+    }
+  }
+
+  const cufeMatch = upper.match(/(?:\bCUFE\b[\s:;#-]*)?([A-Z0-9-]{20,120})/);
+  if (cufeMatch && /[A-Z]/.test(cufeMatch[1]) && /\d/.test(cufeMatch[1])) {
+    data.cufe = cufeMatch[1].replace(/[^A-Z0-9-]/g, '');
+  }
+
+  const facturaMatch = txt.match(/(?:N[ÚU]MERO|NUM|NO\.?|FACTURA|FOLIO)\s*(?:DE\s*)?(?:FACTURA)?\s*[:#-]?\s*([A-Z0-9-]{3,40})/i);
+  if (facturaMatch) {
+    data.numeroFactura = limpiarTexto(facturaMatch[1]);
+  }
+
+  const montos = [];
+  const lineas = txt.split(/\r?\n/);
+  const montoRegex = /(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2}))/g;
+  for (let i = 0; i < lineas.length; i++) {
+    const linea = lineas[i];
+    let mm;
+    while ((mm = montoRegex.exec(linea)) !== null) {
+      const valor = toNumber(mm[1]);
+      if (valor === '' || valor <= 0) continue;
+      montos.push({
+        valor: valor,
+        linea: linea.toUpperCase()
+      });
+    }
+  }
+
+  let total = '';
+  let itbms = '';
+  for (let i = 0; i < montos.length; i++) {
+    const mItem = montos[i];
+    if (/(TOTAL\s+A\s+PAGAR|IMPORTE\s+TOTAL|GRAN\s+TOTAL|VALOR\s+TOTAL|TOTAL)/i.test(mItem.linea)) {
+      if (total === '' || mItem.valor > total) total = mItem.valor;
+    }
+    if (/(ITBMS|IVA|IMPUESTO)/i.test(mItem.linea)) {
+      if (itbms === '' || mItem.valor > itbms) itbms = mItem.valor;
+    }
+  }
+
+  if (total === '' && montos.length) {
+    montos.sort(function (a, b) { return b.valor - a.valor; });
+    total = montos[0].valor;
+  }
+  if (itbms === '' && total !== '' && montos.length) {
+    for (let i = 0; i < montos.length; i++) {
+      if (montos[i].valor < total && montos[i].valor <= total * 0.2) {
+        if (itbms === '' || montos[i].valor > itbms) itbms = montos[i].valor;
+      }
+    }
+  }
+
+  data.total = total;
+  data.itbms = itbms;
+  return data;
+}
+
+function validarResultado(data) {
+  const out = {
+    estado: 'OK',
+    esValido: true,
+    observaciones: ''
+  };
+  const fecha = limpiarTexto(data.fecha);
+  const proveedor = limpiarTexto(data.proveedor);
+  const total = toNumber(data.total);
+  const itbms = toNumber(data.itbms);
+  const cufe = limpiarTexto(data.cufe);
+
+  if (data.noFiscalDetectado) {
+    out.estado = 'NO_FISCAL';
+    out.esValido = false;
+    out.observaciones = anexarObs(out.observaciones, 'Expresiones de documento no fiscal');
+    return out;
+  }
+
+  if (!fecha || !proveedor || total === '') {
+    out.estado = 'REVISION_MANUAL';
+    out.esValido = false;
+    out.observaciones = anexarObs(out.observaciones, 'Faltan campos clave');
+  }
+
+  if (itbms !== '' && total !== '' && itbms > total) {
+    out.estado = 'ERROR_EXTRACCION';
+    out.esValido = false;
+    out.observaciones = anexarObs(out.observaciones, 'ITBMS mayor que total');
+  }
+
+  if (cufe && !/^[A-Z0-9-]{20,120}$/.test(cufe)) {
+    out.estado = 'REVISION_MANUAL';
+    out.esValido = false;
+    out.observaciones = anexarObs(out.observaciones, 'CUFE con formato inválido');
+  }
+
+  return out;
+}
+
+function calcularConfianza(data, fuente) {
+  let score = 0.2;
+  if (data.fecha) score += 0.2;
+  if (data.proveedor) score += 0.2;
+  if (toNumber(data.total) !== '') score += 0.2;
+  if (toNumber(data.itbms) !== '') score += 0.05;
+  if (data.cufe) score += 0.05;
+  if (data.numeroFactura) score += 0.05;
+  if (fuente === 'DGI') score += 0.05;
+
+  const validacion = validarResultado(data);
+  if (validacion.estado === 'REVISION_MANUAL') score -= 0.15;
+  if (validacion.estado === 'ERROR_EXTRACCION') score -= 0.5;
+  if (validacion.estado === 'NO_FISCAL') score -= 0.4;
+
+  if (score < 0) score = 0;
+  if (score > 1) score = 1;
+  return Math.round(score * 100) / 100;
 }
 
 function isDuplicateInvoice(sheet, cufe, driveFileId) {
