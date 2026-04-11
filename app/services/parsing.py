@@ -4,9 +4,8 @@ import base64
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from difflib import SequenceMatcher
-
 from app.models import InvoiceResult
+from app.services.supplier_catalog import normalize_supplier_from_catalog
 
 
 MONEY_TOKEN_RE = re.compile(r"(?:\$\s*)?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2}))")
@@ -16,16 +15,6 @@ DATE_PATTERNS = [
     re.compile(r"\b(\d{2}-\d{2}-\d{4})\b"),
 ]
 RUC_RE = re.compile(r"\b(\d{5,12}-\d{1,4}-\d{1,6})\b", flags=re.IGNORECASE)
-
-CANONICAL_BY_RUC = {
-    "155701584-2-2021": "MEGA LONG, S.A.",
-}
-
-MEGA_LONG_ALIASES = [
-    "MEGA LOKO",
-    "MEGA LONG PILÓN",
-    "MEGA LONG PILON",
-]
 
 
 def decode_base64_file(content_base64: str) -> bytes:
@@ -152,27 +141,12 @@ def _find_ruc(text: str) -> str | None:
 
 
 def _normalize_supplier(ruc: str | None, razon_social: str | None, nombre_marca: str | None) -> tuple[str | None, str | None, float | None]:
-    if ruc and ruc in CANONICAL_BY_RUC:
-        return CANONICAL_BY_RUC[ruc], "match_ruc_exact", 1.0
-
-    candidates = [v for v in [razon_social, nombre_marca] if v]
-    if not candidates:
-        return None, None, None
-
-    best_score = 0.0
-    best_alias = None
-    for cand in candidates:
-        cand_token = _norm_token(cand)
-        for alias in MEGA_LONG_ALIASES:
-            alias_score = SequenceMatcher(None, cand_token, _norm_token(alias)).ratio()
-            if alias_score > best_score:
-                best_score = alias_score
-                best_alias = alias
-
-    if best_alias and best_score >= 0.86:
-        return "MEGA LONG, S.A.", "match_alias_fuzzy", round(min(0.99, best_score), 4)
-
-    return razon_social or nombre_marca, None, round(best_score, 4) if best_score else None
+    return normalize_supplier_from_catalog(
+        ruc=ruc,
+        razon_social=razon_social,
+        nombre_marca=nombre_marca,
+        norm_token=_norm_token,
+    )
 
 
 def _norm_token(raw: str) -> str:
