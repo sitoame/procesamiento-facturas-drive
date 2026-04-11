@@ -380,7 +380,12 @@ function extraerDesdeVision(contexto) {
 function normalizarYValidar(resultado, contexto) {
   const datosBase = resultado.datos || {};
   const proveedor = limpiarTexto(datosBase.proveedor || '');
-  const proveedorNormalizado = normalizarProveedor(proveedor, contexto.catalogoProveedores);
+  const resolucionProveedor = resolverProveedorCanonico({
+    nombreDetectado: proveedor,
+    rucDetectado: datosBase.ruc || '',
+    catalogo: contexto.catalogoProveedores
+  });
+  const proveedorNormalizado = resolucionProveedor.proveedorNormalizado;
   const validacion = validarResultado(datosBase);
 
   const salida = {
@@ -402,6 +407,10 @@ function normalizarYValidar(resultado, contexto) {
   if (contexto.tipoDocumento === 'NO_FISCAL') {
     salida.estado = 'NO_FISCAL';
     return salida;
+  }
+
+  if (resolucionProveedor.fuenteResolucion === 'match_ruc_exact') {
+    salida.observaciones = anexarObs(salida.observaciones, 'fuente_resolucion=match_ruc_exact');
   }
 
   if (!resultado.ok && salida.estado === 'OK') {
@@ -496,25 +505,31 @@ function getCatalogoProveedores(spreadsheet) {
   ensureProveedorCatalogo(catalogoSheet, PROVEEDOR_CANONICO_WEIDER, ALIAS_WEIDER);
 
   const lastRow = catalogoSheet.getLastRow();
-  const catalogo = { aliasMap: {} };
+  const catalogo = { aliasMap: {}, rucMap: {} };
   if (lastRow <= 1) return catalogo;
 
   const values = catalogoSheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CATALOGO.length).getValues();
   for (let i = 0; i < values.length; i++) {
     const canonico = limpiarTexto(values[i][0]);
     const aliasRaw = limpiarTexto(values[i][1]);
+    const rucRaw = limpiarTexto(values[i][2]);
     const activo = parseBooleanCell(values[i][4]);
     if (!canonico || !activo) continue;
 
     const canonicoLimpio = normalizarNombreProveedorBase(canonico);
-    catalogo.aliasMap[canonicoLimpio] = canonicoLimpio;
+    const canonicoOficial = limpiarTexto(canonico);
+    catalogo.aliasMap[canonicoLimpio] = canonicoOficial;
+    const rucNorm = normalizarRuc(rucRaw);
+    if (rucNorm) {
+      catalogo.rucMap[rucNorm] = canonicoOficial;
+    }
 
     if (aliasRaw) {
       const aliasList = aliasRaw.split(/[|,;\n]/);
       for (let j = 0; j < aliasList.length; j++) {
         const aliasLimpio = normalizarNombreProveedorBase(aliasList[j]);
         if (aliasLimpio) {
-          catalogo.aliasMap[aliasLimpio] = canonicoLimpio;
+          catalogo.aliasMap[aliasLimpio] = canonicoOficial;
         }
       }
     }
@@ -652,6 +667,7 @@ function parseInvoiceDataGeneric(text) {
   const data = {
     fecha: '',
     proveedor: '',
+    ruc: '',
     itbms: '',
     total: '',
     cufe: '',
@@ -660,6 +676,7 @@ function parseInvoiceDataGeneric(text) {
   };
 
   data.fecha = extraerDesdeTextoEmbebido_parseFechas(txt);
+  data.ruc = extraerRucDesdeTexto(txt);
 
   const proveedorRegex = /(EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL)\s*:?\s*([^\n\r|]{3,120})/gi;
   const clienteContextoRegex = /(?:RUC\s*\/\s*CIP|\bCLIENTE\b|DIRECCI[ÓO]N|TEL[ÉE]FONO|\bCJ\s*:|\bCAJERO\b|\bVENDEDOR\b)/i;
@@ -911,12 +928,40 @@ function inferirCufeDesdeNombre(nombreArchivo) {
 }
 
 function normalizarProveedor(nombreDetectado, catalogo) {
+  return resolverProveedorCanonico({
+    nombreDetectado: nombreDetectado,
+    rucDetectado: '',
+    catalogo: catalogo
+  }).proveedorNormalizado;
+}
+
+function resolverProveedorCanonico(input) {
+  const nombreDetectado = input && input.nombreDetectado ? input.nombreDetectado : '';
+  const rucDetectado = input && input.rucDetectado ? input.rucDetectado : '';
+  const catalogo = input && input.catalogo ? input.catalogo : null;
   const limpio = normalizarNombreProveedorBase(nombreDetectado);
-  if (!limpio) return '';
-  if (catalogo && catalogo.aliasMap && catalogo.aliasMap[limpio]) {
-    return catalogo.aliasMap[limpio];
+  const rucNorm = normalizarRuc(rucDetectado);
+
+  // lvl 1: match exacto por RUC activo
+  if (rucNorm && catalogo && catalogo.rucMap && catalogo.rucMap[rucNorm]) {
+    return {
+      proveedorNormalizado: catalogo.rucMap[rucNorm],
+      fuenteResolucion: 'match_ruc_exact'
+    };
   }
-  return limpio;
+
+  // fallback por alias/nombre solo si no hay RUC usable
+  if (!rucNorm && limpio && catalogo && catalogo.aliasMap && catalogo.aliasMap[limpio]) {
+    return {
+      proveedorNormalizado: catalogo.aliasMap[limpio],
+      fuenteResolucion: 'match_alias'
+    };
+  }
+
+  return {
+    proveedorNormalizado: limpio || '',
+    fuenteResolucion: limpio ? 'fallback_nombre' : ''
+  };
 }
 
 function construirFirmaFactura(data) {
@@ -950,6 +995,20 @@ function parseBooleanCell(value) {
   return txt === 'SI' || txt === 'SÍ' || txt === 'TRUE' || txt === '1' || txt === 'ACTIVO' || txt === 'X';
 }
 
+function normalizarRuc(value) {
+  const raw = String(value || '').toUpperCase().replace(/\s+/g, '');
+  if (!raw) return '';
+  const limpio = raw.replace(/[^A-Z0-9-]/g, '');
+  if (/^\d{1,20}-\d{1,4}-\d{1,20}$/.test(limpio)) return limpio;
+  return '';
+}
+
+function extraerRucDesdeTexto(texto) {
+  const txt = String(texto || '');
+  const match = txt.match(/\b(\d{1,20}-\d{1,4}-\d{1,20})\b/);
+  return match ? normalizarRuc(match[1]) : '';
+}
+
 function limpiarTexto(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
@@ -976,4 +1035,51 @@ function anexarObs(base, extra) {
   const b = limpiarTexto(base);
   if (!b) return extra;
   return b + ' | ' + extra;
+}
+
+function test_regresion_match_ruc_exact_prioriza_sobre_alias() {
+  const texto = [
+    '1114277-1-562914',
+    'DISTRIBUIDORA LA CARRETILLA',
+    'VENTA CONTADO',
+    'TOTAL B/. 10.00'
+  ].join('\n');
+
+  const parsed = parseInvoiceDataGeneric(texto);
+  const catalogo = {
+    aliasMap: {
+      'VENTA CONTADO': 'WEIDER, S.A.'
+    },
+    rucMap: {
+      '1114277-1-562914': 'WEIDER, S.A.'
+    }
+  };
+
+  const salida = normalizarYValidar({
+    ok: true,
+    metodoExtraccion: 'OCR_DRIVE',
+    confianza: 0.9,
+    datos: {
+      fecha: '2026-01-01',
+      proveedor: parsed.proveedor,
+      ruc: parsed.ruc,
+      total: 10,
+      itbms: 0,
+      cufe: ''
+    },
+    observaciones: ''
+  }, {
+    cufeDetectado: '',
+    tipoDocumento: 'FACTURA',
+    fileId: 'test-file-id',
+    link: 'test-link',
+    catalogoProveedores: catalogo
+  });
+
+  if (salida.proveedorNormalizado !== 'WEIDER, S.A.') {
+    throw new Error('Esperado proveedor canónico WEIDER, S.A., recibido: ' + salida.proveedorNormalizado);
+  }
+  if (salida.observaciones.indexOf('fuente_resolucion=match_ruc_exact') === -1) {
+    throw new Error('No se registró la fuente match_ruc_exact en observaciones');
+  }
 }
