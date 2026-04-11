@@ -166,28 +166,75 @@ function clasificarDocumento(contexto) {
 }
 
 function extraerDesdeDGI(contexto) {
-  if (contexto.clasificacionDocumento !== 'FACTURA_ELECTRONICA_CUFE' || !contexto.cufeDetectado) {
-    return { ok: false, metodoExtraccion: 'DGI', confianza: 0, observaciones: 'CUFE ausente en nombre de archivo' };
-  }
-
-  const texto = extractTextFromCufe(contexto.cufeDetectado);
-  if (!texto || /^Error:/i.test(texto)) {
+  const cufe = inferirCufeDesdeNombre(contexto.nombreArchivo || contexto.fileName || '');
+  if (!cufe) {
     return {
       ok: false,
+      fecha: '',
+      proveedor: '',
+      proveedorNormalizado: '',
+      itbms: '',
+      total: '',
+      cufe: '',
+      tipoDocumento: contexto.tipoDocumento || 'FACTURA',
       metodoExtraccion: 'DGI',
       confianza: 0,
-      observaciones: 'Consulta DGI sin datos útiles'
+      estado: 'REVISION_MANUAL',
+      observaciones: 'CUFE ausente o inválido en nombre de archivo',
+      error: { tipo: 'CUFE_INVALIDO', detalle: 'No se detectó CUFE en el nombre del archivo' }
     };
   }
 
-  const datos = parseInvoiceData(texto);
+  const consulta = extractTextFromCufe(cufe);
+  if (!consulta.ok) {
+    return {
+      ok: false,
+      fecha: '',
+      proveedor: '',
+      proveedorNormalizado: '',
+      itbms: '',
+      total: '',
+      cufe: cufe,
+      tipoDocumento: contexto.tipoDocumento || 'FACTURA',
+      metodoExtraccion: 'DGI',
+      confianza: 0,
+      estado: 'REVISION_MANUAL',
+      observaciones: consulta.observaciones || 'Fallo de consulta DGI',
+      error: {
+        tipo: consulta.errorType || 'CONSULTA_DGI_FALLIDA',
+        statusCode: consulta.statusCode || 0,
+        detalle: consulta.observaciones || 'Sin detalle de error'
+      }
+    };
+  }
+
+  const parsed = parseInvoiceDataFromDgiText(consulta.text);
+  const estado = parsed.estado || 'REVISION_MANUAL';
+  const confianza = estado === 'OK' ? 0.95 : 0.4;
+
   return {
-    ok: true,
+    ok: estado === 'OK',
+    fecha: parsed.fecha,
+    proveedor: parsed.proveedor,
+    proveedorNormalizado: normalizarProveedor(parsed.proveedor),
+    itbms: parsed.itbms,
+    total: parsed.total,
+    cufe: parsed.cufe || cufe,
+    tipoDocumento: parsed.tipoDocumento || (contexto.tipoDocumento || 'FACTURA'),
     metodoExtraccion: 'DGI',
-    confianza: 0.95,
-    textoFuente: texto,
-    datos: datos,
-    observaciones: 'Extracción por CUFE en DGI'
+    confianza: confianza,
+    estado: estado,
+    observaciones: parsed.observaciones || 'Extracción DGI completada',
+    datos: {
+      fecha: parsed.fecha,
+      proveedor: parsed.proveedor,
+      itbms: parsed.itbms,
+      total: parsed.total,
+      cufe: parsed.cufe || cufe,
+      ruc: parsed.ruc,
+      numeroFactura: parsed.numeroFactura
+    },
+    textoFuente: consulta.text
   };
 }
 
@@ -304,13 +351,13 @@ function normalizarYValidar(resultado, contexto) {
     tipoDocumento: contexto.tipoDocumento,
     metodoExtraccion: resultado.metodoExtraccion || 'N/D',
     confianza: resultado.confianza || 0,
-    estado: 'OK',
+    estado: resultado.estado || 'OK',
     observaciones: resultado.observaciones || '',
     driveFileId: contexto.fileId,
     link: contexto.link
   };
 
-  if (!resultado.ok) {
+  if (!resultado.ok && salida.estado === 'OK') {
     salida.estado = 'PENDIENTE_REVISION';
   }
 
@@ -467,6 +514,143 @@ function parseInvoiceData(text) {
   if (cufeMatch) data.cufe = cufeMatch[1].trim();
 
   return data;
+}
+
+
+function parseInvoiceDataFromDgiText(text) {
+  const src = String(text || '');
+  const normalized = src
+    .replace(/\r/g, '\n')
+    .replace(/[\t\f\v]+/g, ' ')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+
+  const result = {
+    fecha: '',
+    proveedor: '',
+    ruc: '',
+    numeroFactura: '',
+    itbms: '',
+    total: '',
+    cufe: '',
+    tipoDocumento: 'FACTURA',
+    estado: 'REVISION_MANUAL',
+    observaciones: ''
+  };
+
+  const fechaCandidates = [
+    /FECHA\s*DE\s*EMISI[ÓO]N\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+    /FECHA\s*EMISI[ÓO]N\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+    /FECHA\s*AUTORIZACI[ÓO]N\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i
+  ];
+  result.fecha = normalizeDateCapture(extractFirstMatch(normalized, fechaCandidates));
+
+  const proveedorCandidates = [
+    /(?:^|\n)\s*EMISOR\s*:?\s*([^\n]+)/i,
+    /(?:^|\n)\s*NOMBRE\s*(?:DEL\s*EMISOR)?\s*:?\s*([^\n]+)/i,
+    /(?:^|\n)\s*RAZ[ÓO]N\s*SOCIAL\s*:?\s*([^\n]+)/i
+  ];
+  result.proveedor = cleanField(extractFirstMatch(normalized, proveedorCandidates));
+
+  const cufeCandidates = [
+    /(?:^|\n)\s*CUFE\s*:?\s*([A-Z0-9\-]{20,140})/i,
+    /(?:^|\n)\s*CODIGO\s*UNICO\s*DE\s*FACTURA\s*ELECTR[ÓO]NICA\s*:?\s*([A-Z0-9\-]{20,140})/i,
+    /\b(FE[A-Z0-9]{18,140})\b/
+  ];
+  result.cufe = cleanField(extractFirstMatch(normalized, cufeCandidates)).toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  const itbmsCandidates = [
+    /ITBMS(?:\s*TOTAL)?\s*:?\s*(B\/.\s*)?([\d.,]+(?:\s*[\d.,]+)*)/i,
+    /IMPUESTO\s*(?:TOTAL)?\s*:?\s*(B\/.\s*)?([\d.,]+(?:\s*[\d.,]+)*)/i
+  ];
+  result.itbms = parseMoneyCapture(extractFirstMatch(normalized, itbmsCandidates, 2));
+
+  const totalCandidates = [
+    /VALOR\s*TOTAL\s*:?\s*(B\/.\s*)?([\d.,]+(?:\s*[\d.,]+)*)/i,
+    /TOTAL\s*(?:A\s*PAGAR)?\s*:?\s*(B\/.\s*)?([\d.,]+(?:\s*[\d.,]+)*)/i,
+    /MONTO\s*TOTAL\s*:?\s*(B\/.\s*)?([\d.,]+(?:\s*[\d.,]+)*)/i
+  ];
+  result.total = parseMoneyCapture(extractFirstMatch(normalized, totalCandidates, 2));
+
+  const facturaCandidates = [
+    /N[ÚU]MERO\s*DE\s*FACTURA\s*:?\s*([A-Z0-9\-\/]+)/i,
+    /FACTURA\s*N[O°º#]?\s*:?\s*([A-Z0-9\-\/]+)/i,
+    /NO\.\s*FACTURA\s*:?\s*([A-Z0-9\-\/]+)/i
+  ];
+  result.numeroFactura = cleanField(extractFirstMatch(normalized, facturaCandidates));
+
+  const rucCandidates = [
+    /(?:^|\n)\s*RUC\s*:?\s*([0-9\-]{4,25})/i,
+    /REGISTRO\s*[ÚU]NICO\s*DE\s*CONTRIBUYENTE\s*:?\s*([0-9\-]{4,25})/i
+  ];
+  result.ruc = cleanField(extractFirstMatch(normalized, rucCandidates));
+
+  const missing = [];
+  if (!result.fecha) missing.push('fecha');
+  if (!result.proveedor) missing.push('proveedor');
+  if (result.total === '' || result.total === null) missing.push('total');
+  if (!result.cufe) missing.push('cufe');
+
+  if (missing.length === 0) {
+    result.estado = 'OK';
+    result.observaciones = 'Campos clave DGI extraídos';
+  } else {
+    result.estado = 'REVISION_MANUAL';
+    result.observaciones = 'Campos clave faltantes: ' + missing.join(', ');
+  }
+
+  return result;
+}
+
+function extractFirstMatch(text, patterns, groupIndex) {
+  const idx = groupIndex || 1;
+  for (let i = 0; i < patterns.length; i++) {
+    const m = text.match(patterns[i]);
+    if (m && m[idx]) return m[idx];
+  }
+  return '';
+}
+
+function cleanField(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeDateCapture(value) {
+  const raw = cleanField(value).replace(/\-/g, '/');
+  if (!raw) return '';
+  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (!m) return raw;
+  const dd = ('0' + m[1]).slice(-2);
+  const mm = ('0' + m[2]).slice(-2);
+  let yyyy = m[3];
+  if (yyyy.length === 2) yyyy = '20' + yyyy;
+  return yyyy + '-' + mm + '-' + dd;
+}
+
+function parseMoneyCapture(value) {
+  const raw = cleanField(value);
+  if (!raw) return '';
+  const compact = raw.replace(/\s/g, '').replace(/B\//ig, '').replace(/[^\d,.-]/g, '');
+  if (!compact) return '';
+
+  const lastComma = compact.lastIndexOf(',');
+  const lastDot = compact.lastIndexOf('.');
+  let normalized = compact;
+
+  if (lastComma > -1 && lastDot > -1) {
+    if (lastComma > lastDot) {
+      normalized = compact.replace(/\./g, '').replace(',', '.');
+    } else {
+      normalized = compact.replace(/,/g, '');
+    }
+  } else if (lastComma > -1) {
+    const decimalLike = /,\d{1,2}$/.test(compact);
+    normalized = decimalLike ? compact.replace(/\./g, '').replace(',', '.') : compact.replace(/,/g, '');
+  }
+
+  const n = parseFloat(normalized);
+  return isNaN(n) ? '' : n;
 }
 
 function isDuplicateInvoice(sheet, cufe, driveFileId) {
