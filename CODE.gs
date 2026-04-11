@@ -628,14 +628,17 @@ function parseInvoiceDataGeneric(text) {
 
   data.fecha = extraerDesdeTextoEmbebido_parseFechas(txt);
 
-  const proveedorRegex = /(?:EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL|NOMBRE)\s*:?\s*([^\n\r|]{3,120})/gi;
+  const proveedorRegex = /(?:EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL)\s*:?\s*([^\n\r|]{3,120})/gi;
+  const proveedorBloqueadosRegex = /\b(VENTA\s+CONTADO|CONTADO|CR[ÉE]DITO|CONDICI[ÓO]N\s+DE\s+PAGO|CLIENTE|CAJERO|VENDEDOR|RUC|DV|NIT|CUFE|FACTURA)\b/i;
+  const proveedorEmpresaRegex = /[A-Za-zÁÉÍÓÚÑ]/;
   let pm;
   while ((pm = proveedorRegex.exec(txt)) !== null) {
     const cand = limpiarTexto(pm[1]).replace(/[:;,.]+$/, '');
-    if (cand && !/\b(RUC|DV|NIT|CUFE|FACTURA)\b/i.test(cand)) {
-      data.proveedor = cand;
-      break;
-    }
+    if (!cand) continue;
+    if (!proveedorEmpresaRegex.test(cand)) continue;
+    if (proveedorBloqueadosRegex.test(cand)) continue;
+    data.proveedor = cand;
+    break;
   }
   if (!data.proveedor) {
     const lineas = txt.split(/\r?\n/);
