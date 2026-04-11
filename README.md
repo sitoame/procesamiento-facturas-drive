@@ -27,8 +27,15 @@ Servicio HTTP en Python para recibir PDFs/imágenes en base64 y devolver JSON es
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+make run
 ```
+
+### Error común: `ModuleNotFoundError: No module named "app"`
+
+Este error aparece cuando Uvicorn se ejecuta fuera de la raíz del repo.
+
+- Ejecuta siempre desde la raíz del proyecto: `make run`.
+- Si prefieres comando directo: `python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --app-dir .`
 
 ## Endpoint
 
