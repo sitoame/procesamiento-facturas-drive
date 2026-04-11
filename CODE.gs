@@ -616,6 +616,8 @@ function parseInvoiceDataGeneric(text) {
   const raw = String(text || '');
   const txt = raw.replace(/\u00A0/g, ' ');
   const upper = txt.toUpperCase();
+  const proveedorBloqueadosRegex = /\b(RUC|DV|NIT|CUFE|FACTURA|FECHA|DOC(?:UMENTO)?|TOTAL|SUBTOTAL|ITBMS|IVA|CAJA|PAGO|AUTORIZACI[ÓO]N|RESOLUCI[ÓO]N)\b/i;
+  const clienteBloqueadosRegex = /\b(CLIENTE|NOMBRE\s+DEL\s+CLIENTE|SEÑOR(?:ES)?|COMPRADOR|ADQUIRIENTE|RECEPTOR|CONTRIBUYENTE|A\s+NOMBRE\s+DE)\b/i;
   const data = {
     fecha: '',
     proveedor: '',
@@ -628,20 +630,49 @@ function parseInvoiceDataGeneric(text) {
 
   data.fecha = extraerDesdeTextoEmbebido_parseFechas(txt);
 
+  // try header-first provider detection
+  const lineas = txt.split(/\r?\n/);
+  const encabezado = [];
+  const separadorDetalleRegex = /\b(FACTURA|DOC\s*:|DOCUMENTO\s*:|FECHA\s*:)\b/i;
+  const lineaItemsRegex = /^\s*(?:\d+\s+)?[A-ZÁÉÍÓÚÑ0-9\-\/ ]{3,}\s+\d+(?:[.,]\d{2})\s+\d+(?:[.,]\d{2})\s*$/i;
+  for (let i = 0; i < Math.min(20, lineas.length); i++) {
+    const l = limpiarTexto(lineas[i]);
+    if (!l) continue;
+    if (separadorDetalleRegex.test(l) || lineaItemsRegex.test(l)) break;
+    encabezado.push(l);
+  }
+  for (let i = 0; i < encabezado.length; i++) {
+    const l = encabezado[i];
+    if (l.length < 5 || l.length > 120) continue;
+    if (proveedorBloqueadosRegex.test(l) || clienteBloqueadosRegex.test(l)) continue;
+    if (/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})|\d+(?:[.,]\d{2})/.test(l)) continue;
+    if (/\b(EMISOR|PROVEEDOR)\b/i.test(l)) continue;
+    if (!/[A-Za-zÁÉÍÓÚÑ]/.test(l)) continue;
+    const hasSocietario = /\bS\.?\s*A\.?\b/.test(l);
+    const soloLetras = (l.match(/[A-ZÁÉÍÓÚÑ]/g) || []).length;
+    const letrasTotales = (l.match(/[A-Za-zÁÉÍÓÚÑ]/g) || []).length;
+    const mayusComercial = letrasTotales >= 8 && soloLetras / letrasTotales >= 0.75 && /\s/.test(l);
+    if (!hasSocietario && !mayusComercial) continue;
+    data.proveedor = l.replace(/[:;,.]+$/, '');
+    break;
+  }
+
   const proveedorRegex = /(?:EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL|NOMBRE)\s*:?\s*([^\n\r|]{3,120})/gi;
   let pm;
-  while ((pm = proveedorRegex.exec(txt)) !== null) {
-    const cand = limpiarTexto(pm[1]).replace(/[:;,.]+$/, '');
-    if (cand && !/\b(RUC|DV|NIT|CUFE|FACTURA)\b/i.test(cand)) {
-      data.proveedor = cand;
-      break;
+  if (!data.proveedor) {
+    while ((pm = proveedorRegex.exec(txt)) !== null) {
+      const cand = limpiarTexto(pm[1]).replace(/[:;,.]+$/, '');
+      if (cand && !proveedorBloqueadosRegex.test(cand) && !clienteBloqueadosRegex.test(cand)) {
+        data.proveedor = cand;
+        break;
+      }
     }
   }
   if (!data.proveedor) {
-    const lineas = txt.split(/\r?\n/);
     for (let i = 0; i < Math.min(6, lineas.length); i++) {
       const l = limpiarTexto(lineas[i]);
       if (l.length >= 5 && l.length <= 120 && /[A-Za-zÁÉÍÓÚÑ]/.test(l) && !/\d{3,}/.test(l)) {
+        if (proveedorBloqueadosRegex.test(l) || clienteBloqueadosRegex.test(l)) continue;
         data.proveedor = l;
         break;
       }
