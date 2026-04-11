@@ -627,15 +627,25 @@ function parseInvoiceDataGeneric(text) {
 
   data.fecha = extraerDesdeTextoEmbebido_parseFechas(txt);
 
-  const proveedorRegex = /(?:EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL)\s*:?\s*([^\n\r|]{3,120})/gi;
+  const proveedorRegex = /(EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL)\s*:?\s*([^\n\r|]{3,120})/gi;
   const proveedorBloqueadosRegex = /\b(VENTA\s+CONTADO|CONTADO|CR[ÉE]DITO|CONDICI[ÓO]N\s+DE\s+PAGO|CLIENTE|CAJERO|VENDEDOR|RUC|DV|NIT|CUFE|FACTURA)\b/i;
+  const clienteContextoRegex = /(?:RUC\s*\/\s*CIP|\bCLIENTE\b|DIRECCI[ÓO]N|TEL[ÉE]FONO|\bCJ\s*:|\bCAJERO\b|\bVENDEDOR\b)/i;
   const proveedorEmpresaRegex = /[A-Za-zÁÉÍÓÚÑ]/;
   let pm;
   while ((pm = proveedorRegex.exec(txt)) !== null) {
-    const cand = limpiarTexto(pm[1]).replace(/[:;,.]+$/, '');
+    const etiqueta = (pm[1] || '').toUpperCase();
+    const cand = limpiarTexto(pm[2]).replace(/[:;,.]+$/, '');
     if (!cand) continue;
     if (!proveedorEmpresaRegex.test(cand)) continue;
     if (proveedorBloqueadosRegex.test(cand)) continue;
+
+    if (/RAZ[ÓO]N\s+SOCIAL/.test(etiqueta)) {
+      const ini = Math.max(0, pm.index - 120);
+      const fin = Math.min(txt.length, proveedorRegex.lastIndex + 120);
+      const ventana = txt.slice(ini, fin);
+      if (clienteContextoRegex.test(ventana)) continue;
+    }
+
     data.proveedor = cand;
     break;
   }
