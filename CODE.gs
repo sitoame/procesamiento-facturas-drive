@@ -27,6 +27,16 @@ const ENCABEZADOS_CATALOGO = [
   'Activo'
 ];
 
+// init cfg backend extracción externa
+const VISION_API_CONFIG = {
+  endpointUrl: 'https://TU_BACKEND/extract-invoice',
+  apiKey: '',
+  timeoutMs: 20000,
+  maxRetries: 2,
+  retryBaseMs: 1200,
+  retryJitterMs: 300
+};
+
 function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
   const folder = DriveApp.getFolderById(idCarpetaPdf);
   const spreadsheet = getOrCreateSpreadsheet(
@@ -367,19 +377,221 @@ function textoEsInsuficiente(texto) {
 }
 
 function extraerDesdeVision(contexto) {
+  const payload = {
+    fileName: String(contexto.fileName || ''),
+    mimeType: String(contexto.mimeType || ''),
+    contentBase64: Utilities.base64Encode(contexto.file.getBlob().getBytes()),
+    driveFileId: String(contexto.fileId || ''),
+    timeoutMs: VISION_API_CONFIG.timeoutMs
+  };
+
+  const invocacion = invocarBackendVision(payload);
+  if (!invocacion.ok) {
+    return construirResultadoErrorVision(contexto, invocacion.error);
+  }
+
+  return mapearRespuestaVisionAResultado(contexto, invocacion.data);
+}
+
+function invocarBackendVision(payload) {
+  if (!VISION_API_CONFIG.endpointUrl || /TU_BACKEND/.test(VISION_API_CONFIG.endpointUrl)) {
+    return {
+      ok: false,
+      error: {
+        code: 'VISION_ENDPOINT_NO_CONFIGURADO',
+        message: 'Endpoint de visión no configurado',
+        detail: 'Actualiza VISION_API_CONFIG.endpointUrl'
+      }
+    };
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (VISION_API_CONFIG.apiKey) {
+    headers.Authorization = 'Bearer ' + VISION_API_CONFIG.apiKey;
+  }
+
+  const req = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    headers: headers,
+    muteHttpExceptions: true
+  };
+
+  return fetchVisionConReintentos(VISION_API_CONFIG.endpointUrl, req, {
+    maxRetries: VISION_API_CONFIG.maxRetries,
+    retryBaseMs: VISION_API_CONFIG.retryBaseMs,
+    retryJitterMs: VISION_API_CONFIG.retryJitterMs
+  });
+}
+
+function fetchVisionConReintentos(url, options, cfg) {
+  let ultimoErr = null;
+  const intentos = Math.max(0, Number(cfg.maxRetries || 0)) + 1;
+
+  for (let intento = 1; intento <= intentos; intento++) {
+    try {
+      const startedAt = new Date().getTime();
+      const resp = UrlFetchApp.fetch(url, options);
+      const elapsedMs = new Date().getTime() - startedAt;
+      const statusCode = resp.getResponseCode();
+      const body = resp.getContentText() || '';
+
+      if (statusCode >= 200 && statusCode < 300) {
+        const parsed = parsearRespuestaVision(body);
+        if (!parsed.ok) return parsed;
+        parsed.elapsedMs = elapsedMs;
+        return parsed;
+      }
+
+      ultimoErr = {
+        code: 'VISION_HTTP_' + statusCode,
+        message: 'Backend externo devolvió HTTP no exitoso',
+        detail: body ? body.slice(0, 800) : '',
+        statusCode: statusCode
+      };
+
+      if (!debeReintentarHttp(statusCode) || intento === intentos) {
+        break;
+      }
+    } catch (err) {
+      ultimoErr = {
+        code: 'VISION_FETCH_EXCEPTION',
+        message: 'Fallo de red invocando backend externo',
+        detail: err.message,
+        statusCode: 0
+      };
+      if (intento === intentos) break;
+    }
+
+    const backoffMs = (cfg.retryBaseMs * intento) + Math.floor(Math.random() * (cfg.retryJitterMs || 0));
+    Utilities.sleep(backoffMs);
+  }
+
+  return { ok: false, error: ultimoErr || { code: 'VISION_ERROR', message: 'Error desconocido backend visión' } };
+}
+
+function parsearRespuestaVision(body) {
+  if (!body) {
+    return {
+      ok: false,
+      error: { code: 'VISION_BODY_VACIO', message: 'Respuesta vacía del backend externo', detail: '' }
+    };
+  }
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch (err) {
+    return {
+      ok: false,
+      error: { code: 'VISION_JSON_INVALIDO', message: 'JSON inválido en respuesta externa', detail: err.message }
+    };
+  }
+
+  const schema = validarSchemaRespuestaVision(data);
+  if (!schema.ok) {
+    return { ok: false, error: schema.error };
+  }
+
+  return { ok: true, data: data };
+}
+
+function validarSchemaRespuestaVision(data) {
+  const required = ['tipo_documento', 'fecha', 'proveedor', 'itbms', 'total', 'confianza'];
+  for (let i = 0; i < required.length; i++) {
+    const key = required[i];
+    if (data[key] === undefined || data[key] === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'VISION_SCHEMA_INVALIDO',
+          message: 'Campo obligatorio ausente en respuesta externa',
+          detail: key
+        }
+      };
+    }
+  }
+
+  const confianza = toNumber(data.confianza);
+  const total = toNumber(data.total);
+  const itbms = toNumber(data.itbms);
+  if (confianza === '' || confianza < 0 || confianza > 1) {
+    return {
+      ok: false,
+      error: { code: 'VISION_CONFIANZA_INVALIDA', message: 'confianza fuera de rango [0,1]', detail: String(data.confianza) }
+    };
+  }
+  if (total === '' || total < 0) {
+    return {
+      ok: false,
+      error: { code: 'VISION_TOTAL_INVALIDO', message: 'total inválido', detail: String(data.total) }
+    };
+  }
+  if (itbms === '' || itbms < 0) {
+    return {
+      ok: false,
+      error: { code: 'VISION_ITBMS_INVALIDO', message: 'itbms inválido', detail: String(data.itbms) }
+    };
+  }
+
+  return { ok: true };
+}
+
+function mapearRespuestaVisionAResultado(contexto, ext) {
+  const tipoDoc = limpiarTexto(ext.tipo_documento || '').toUpperCase() || 'FACTURA';
+  const datos = {
+    fecha: limpiarTexto(ext.fecha || ''),
+    proveedor: limpiarTexto(ext.proveedor || ''),
+    proveedorNormalizado: normalizarProveedor(ext.proveedor || '', contexto.catalogoProveedores || null),
+    itbms: toNumber(ext.itbms),
+    total: toNumber(ext.total),
+    cufe: limpiarTexto(ext.cufe || contexto.cufeDetectado || ''),
+    numeroFactura: limpiarTexto(ext.numero_factura || ''),
+    tipoDocumento: tipoDoc
+  };
+
+  const confianza = toNumber(ext.confianza);
+  const observaciones = limpiarTexto(ext.observaciones || '');
+  return {
+    ok: true,
+    metodoExtraccion: 'VISION_API',
+    confianza: confianza === '' ? 0 : confianza,
+    estado: 'OK',
+    datos: datos,
+    observaciones: observaciones
+  };
+}
+
+function construirResultadoErrorVision(contexto, err) {
   return {
     ok: false,
-    metodoExtraccion: 'VISION_STUB',
+    metodoExtraccion: 'VISION_API',
     confianza: 0,
-    observaciones: 'Stub listo para integrar API externa'
+    estado: 'ERROR_EXTRACCION',
+    datos: {
+      fecha: '',
+      proveedor: '',
+      proveedorNormalizado: '',
+      itbms: '',
+      total: '',
+      cufe: contexto.cufeDetectado || '',
+      numeroFactura: '',
+      tipoDocumento: contexto.tipoDocumento || 'FACTURA'
+    },
+    observaciones: 'Error integración visión [' + (err.code || 'N/A') + ']: ' + (err.message || 'Sin detalle'),
+    error: err
   };
+}
+
+function debeReintentarHttp(statusCode) {
+  return statusCode === 408 || statusCode === 425 || statusCode === 429 || statusCode >= 500;
 }
 
 function normalizarYValidar(resultado, contexto) {
   const datosBase = resultado.datos || {};
   const proveedor = limpiarTexto(datosBase.proveedor || '');
   const proveedorNormalizado = normalizarProveedor(proveedor, contexto.catalogoProveedores);
-  const proveedorNormalizado = normalizarProveedor(proveedor);
   const validacion = validarResultado(datosBase);
 
   const salida = {
