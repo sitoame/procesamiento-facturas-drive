@@ -26,6 +26,8 @@ const ENCABEZADOS_CATALOGO = [
   'Tipo Documento Frecuente',
   'Activo'
 ];
+const PROVEEDOR_CANONICO_WEIDER = 'WEIDER, S.A.';
+const ALIAS_WEIDER = ['WEIDER SA', 'WEIDER S A', 'WEIDER,S.A', 'VENTA CONTADO'];
 
 function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
   const folder = DriveApp.getFolderById(idCarpetaPdf);
@@ -491,6 +493,7 @@ function getCatalogoProveedores(spreadsheet) {
     catalogoSheet = spreadsheet.insertSheet(NOMBRE_HOJA_CATALOGO);
   }
   ensureHeaders(catalogoSheet, ENCABEZADOS_CATALOGO);
+  ensureProveedorCatalogo(catalogoSheet, PROVEEDOR_CANONICO_WEIDER, ALIAS_WEIDER);
 
   const lastRow = catalogoSheet.getLastRow();
   const catalogo = { aliasMap: {} };
@@ -518,6 +521,37 @@ function getCatalogoProveedores(spreadsheet) {
   }
 
   return catalogo;
+}
+
+function ensureProveedorCatalogo(sheet, proveedorCanonico, aliases) {
+  const aliasList = aliases.filter(function (alias) { return limpiarTexto(alias); });
+  const aliasRaw = aliasList.join(' | ');
+  const canonicoNormalizado = normalizarNombreProveedorBase(proveedorCanonico);
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow <= 1) {
+    sheet.appendRow([proveedorCanonico, aliasRaw, '', '', 'SI']);
+    return;
+  }
+
+  const values = sheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CATALOGO.length).getValues();
+  let rowIndex = -1;
+  for (let i = 0; i < values.length; i++) {
+    const canonicoExistente = normalizarNombreProveedorBase(values[i][0]);
+    if (canonicoExistente === canonicoNormalizado) {
+      rowIndex = i + 2;
+      break;
+    }
+  }
+
+  if (rowIndex === -1) {
+    sheet.appendRow([proveedorCanonico, aliasRaw, '', '', 'SI']);
+    return;
+  }
+
+  const current = sheet.getRange(rowIndex, 1, 1, ENCABEZADOS_CATALOGO.length).getValues()[0];
+  const next = [proveedorCanonico, aliasRaw, current[2] || '', current[3] || '', 'SI'];
+  sheet.getRange(rowIndex, 1, 1, ENCABEZADOS_CATALOGO.length).setValues([next]);
 }
 
 function ensureHeaders(sheet, headers) {
