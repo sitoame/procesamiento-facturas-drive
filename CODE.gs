@@ -631,23 +631,52 @@ function parseInvoiceDataGeneric(text) {
   const proveedorBloqueadosRegex = /\b(VENTA\s+CONTADO|CONTADO|CR[ÉE]DITO|CONDICI[ÓO]N\s+DE\s+PAGO|CLIENTE|CAJERO|VENDEDOR|RUC|DV|NIT|CUFE|FACTURA)\b/i;
   const clienteContextoRegex = /(?:RUC\s*\/\s*CIP|\bCLIENTE\b|DIRECCI[ÓO]N|TEL[ÉE]FONO|\bCJ\s*:|\bCAJERO\b|\bVENDEDOR\b)/i;
   const proveedorEmpresaRegex = /[A-Za-zÁÉÍÓÚÑ]/;
-  let pm;
-  while ((pm = proveedorRegex.exec(txt)) !== null) {
-    const etiqueta = (pm[1] || '').toUpperCase();
-    const cand = limpiarTexto(pm[2]).replace(/[:;,.]+$/, '');
-    if (!cand) continue;
+  const proveedorHeadStopRegex = /(?:\bFACTURA\b|\bDOC\s*:|\bFECHA\s*:|\bDESCRIPCI[ÓO]N\b|\bCANT(?:IDAD)?\b|\bPRECIO\b|\bTOTAL\b)/i;
+  const proveedorHeadTokenBlockRegex = /\b(FACTURA|DOC|DOCUMENTO|FECHA|CLIENTE|CAJERO|VENDEDOR|RUC|NIT|DV|ITBMS|IVA|TOTAL|SUBTOTAL|PAGO|CONDICI[ÓO]N|C[ÓO]DIGO|CANTIDAD|DESCRIPCI[ÓO]N|PRECIO)\b/i;
+  const proveedorHeadMoneyRegex = /(?:B\/\.?|USD|\$|\d+[.,]\d{2}|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?)/i;
+  const proveedorHeadSenalRegex = /(?:\bS\.?\s*A\.?\b|\bS\.?\s*R\.?\s*L\.?\b|\bINC\.?\b|\bCORP\.?\b|&\s*C[IÍ]A\b|\bC[IÍ]A\.?\b|^[A-ZÁÉÍÓÚÑ0-9&.,'"\-\/\s]{8,}$)/i;
+
+  // init proveedor desde encabezado alto antes de etiquetas ambiguas
+  const lineasProveedor = txt.split(/\r?\n/);
+  const topLines = [];
+  for (let i = 0; i < Math.min(25, lineasProveedor.length); i++) {
+    const ln = limpiarTexto(lineasProveedor[i]);
+    if (!ln) continue;
+    if (proveedorHeadStopRegex.test(ln)) break;
+    topLines.push(ln);
+  }
+  for (let i = 0; i < topLines.length; i++) {
+    const cand = topLines[i].replace(/[:;,.]+$/, '');
+    if (cand.length < 5 || cand.length > 120) continue;
     if (!proveedorEmpresaRegex.test(cand)) continue;
+    if (proveedorHeadMoneyRegex.test(cand)) continue;
+    if (proveedorHeadTokenBlockRegex.test(cand)) continue;
+    if (!proveedorHeadSenalRegex.test(cand)) continue;
     if (proveedorBloqueadosRegex.test(cand)) continue;
-
-    if (/RAZ[ÓO]N\s+SOCIAL/.test(etiqueta)) {
-      const ini = Math.max(0, pm.index - 120);
-      const fin = Math.min(txt.length, proveedorRegex.lastIndex + 120);
-      const ventana = txt.slice(ini, fin);
-      if (clienteContextoRegex.test(ventana)) continue;
-    }
-
+    if (clienteContextoRegex.test(cand)) continue;
     data.proveedor = cand;
     break;
+  }
+
+  let pm;
+  if (!data.proveedor) {
+    while ((pm = proveedorRegex.exec(txt)) !== null) {
+      const etiqueta = (pm[1] || '').toUpperCase();
+      const cand = limpiarTexto(pm[2]).replace(/[:;,.]+$/, '');
+      if (!cand) continue;
+      if (!proveedorEmpresaRegex.test(cand)) continue;
+      if (proveedorBloqueadosRegex.test(cand)) continue;
+
+      if (/RAZ[ÓO]N\s+SOCIAL/.test(etiqueta)) {
+        const ini = Math.max(0, pm.index - 120);
+        const fin = Math.min(txt.length, proveedorRegex.lastIndex + 120);
+        const ventana = txt.slice(ini, fin);
+        if (clienteContextoRegex.test(ventana)) continue;
+      }
+
+      data.proveedor = cand;
+      break;
+    }
   }
   if (!data.proveedor) {
     const lineas = txt.split(/\r?\n/);
