@@ -379,7 +379,6 @@ function normalizarYValidar(resultado, contexto) {
   const datosBase = resultado.datos || {};
   const proveedor = limpiarTexto(datosBase.proveedor || '');
   const proveedorNormalizado = normalizarProveedor(proveedor, contexto.catalogoProveedores);
-  const proveedorNormalizado = normalizarProveedor(proveedor);
   const validacion = validarResultado(datosBase);
 
   const salida = {
