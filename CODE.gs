@@ -177,30 +177,101 @@ function clasificarDocumento(contexto) {
 }
 
 function extraerDesdeDGI(contexto) {
-  if (contexto.clasificacionDocumento !== 'FACTURA_ELECTRONICA_CUFE' || !contexto.cufeDetectado) {
-    return { ok: false, metodoExtraccion: 'DGI', confianza: 0, observaciones: 'CUFE ausente en nombre de archivo' };
-  }
-
-  const texto = extractTextFromCufe(contexto.cufeDetectado);
-  if (!texto || /^Error:/i.test(texto)) {
+  const cufeNombre = inferirCufeDesdeNombre(contexto.fileName || contexto.nombreArchivo || '');
+  if (!cufeNombre) {
     return {
       ok: false,
       metodoExtraccion: 'DGI',
       confianza: 0,
-      observaciones: 'Consulta DGI sin datos útiles'
+      estado: 'REVISION_MANUAL',
+      datos: {
+        fecha: '',
+        proveedor: '',
+        proveedorNormalizado: '',
+        itbms: '',
+        total: '',
+        cufe: '',
+        tipoDocumento: contexto.tipoDocumento || 'FACTURA',
+        metodoExtraccion: 'DGI',
+        confianza: 0,
+        estado: 'REVISION_MANUAL',
+        observaciones: 'Nombre de archivo sin CUFE válido'
+      },
+      observaciones: 'Nombre de archivo sin CUFE válido'
     };
   }
 
-  const datos = parseInvoiceData(texto);
-  return {
-    ok: true,
+  contexto.cufeDetectado = cufeNombre;
+  const consulta = extractTextFromCufe(cufeNombre);
+  if (!consulta || !consulta.ok) {
+    const errCode = consulta && consulta.error && consulta.error.code ? consulta.error.code : 'DGI_ERROR';
+    const errMsg = consulta && consulta.error && consulta.error.message ? consulta.error.message : 'Consulta DGI fallida';
+    const errDetail = consulta && consulta.error && consulta.error.detail ? consulta.error.detail : '';
+    const obs = 'Consulta DGI fallida [' + errCode + ']: ' + errMsg + (errDetail ? ' - ' + errDetail : '');
+
+    return {
+      ok: false,
+      metodoExtraccion: 'DGI',
+      confianza: 0,
+      estado: 'REVISION_MANUAL',
+      error: {
+        code: errCode,
+        message: errMsg,
+        detail: errDetail,
+        statusCode: consulta && consulta.statusCode ? consulta.statusCode : 0,
+        cufe: cufeNombre
+      },
+      datos: {
+        fecha: '',
+        proveedor: '',
+        proveedorNormalizado: '',
+        itbms: '',
+        total: '',
+        cufe: cufeNombre,
+        tipoDocumento: contexto.tipoDocumento || 'FACTURA',
+        metodoExtraccion: 'DGI',
+        confianza: 0,
+        estado: 'REVISION_MANUAL',
+        observaciones: obs
+      },
+      observaciones: obs
+    };
+  }
+
+  const parsed = parseInvoiceDataFromDgiText(consulta.text);
+  const proveedorNormalizado = normalizarProveedor(parsed.proveedor, contexto.catalogoProveedores || null);
+  const datos = {
+    fecha: parsed.fecha || '',
+    proveedor: parsed.proveedor || '',
+    proveedorNormalizado: proveedorNormalizado || '',
+    itbms: parsed.itbms,
+    total: parsed.total,
+    cufe: parsed.cufe || cufeNombre,
+    tipoDocumento: contexto.tipoDocumento || 'FACTURA',
     metodoExtraccion: 'DGI',
     confianza: 0.95,
-    textoFuente: texto,
+    estado: 'OK',
+    observaciones: ''
+  };
+
+  const faltanClave = !datos.fecha || !datos.proveedor || toNumber(datos.total) === '';
+  if (faltanClave) {
+    datos.estado = 'REVISION_MANUAL';
+    datos.confianza = 0.6;
+    datos.observaciones = 'DGI respondió, pero faltan campos clave (fecha/proveedor/total)';
+  }
+
+  return {
+    ok: !faltanClave,
+    metodoExtraccion: 'DGI',
+    confianza: datos.confianza,
+    estado: datos.estado,
+    textoFuente: consulta.text,
     datos: datos,
-    observaciones: 'Extracción por CUFE en DGI'
+    observaciones: datos.observaciones || 'Extracción por CUFE en DGI'
   };
 }
+
 
 function extraerDesdeTextoEmbebido(contexto) {
   try {
@@ -506,33 +577,6 @@ function extractTextFromPdf(fileId) {
   } finally {
     Drive.Files.remove(tempDoc.id);
   }
-}
-
-function parseInvoiceData(text) {
-  const data = {
-    fecha: '',
-    proveedor: '',
-    itbms: '',
-    total: '',
-    cufe: ''
-  };
-
-  const fechaMatch = text.match(/FECHA\s*AUTORIZACI[ÓO]N\s*:?\s*(\d{2}\/\d{2}\/\d{4})/i);
-  if (fechaMatch) data.fecha = fechaMatch[1];
-
-  const proveedorMatch = text.match(/NOMBRE\s*:?[\s\n]*([^\n]+?)\s*(?:DIRECCI[ÓO]N|RUC|DV|$)/i);
-  if (proveedorMatch) data.proveedor = proveedorMatch[1].trim();
-
-  const itbmsMatch = text.match(/ITBMS\s*Total\s*:?\s*(\d{1,6}(?:[\.,]\d{3})*(?:[\.,]\d+)?)/i);
-  if (itbmsMatch) data.itbms = itbmsMatch[1];
-
-  const totalMatch = text.match(/Valor\s*Total\s*:?\s*(\d{1,9}(?:[\.,]\d{3})*(?:[\.,]\d+)?)/i);
-  if (totalMatch) data.total = totalMatch[1];
-
-  const cufeMatch = text.match(/\[CUFE\]\s*([A-Z0-9-]+)/i);
-  if (cufeMatch) data.cufe = cufeMatch[1].trim();
-
-  return data;
 }
 
 function extraerDesdeTextoEmbebido_parseFechas(texto) {
