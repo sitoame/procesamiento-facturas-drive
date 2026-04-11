@@ -628,65 +628,78 @@ function parseInvoiceDataGeneric(text) {
   data.fecha = extraerDesdeTextoEmbebido_parseFechas(txt);
 
   const proveedorRegex = /(EMISOR|PROVEEDOR|RAZ[ÓO]N\s+SOCIAL|NOMBRE\s+COMERCIAL)\s*:?\s*([^\n\r|]{3,120})/gi;
-  const proveedorBloqueadosRegex = /\b(VENTA\s+CONTADO|CONTADO|CR[ÉE]DITO|CONDICI[ÓO]N\s+DE\s+PAGO|CLIENTE|CAJERO|VENDEDOR|RUC|DV|NIT|CUFE|FACTURA)\b/i;
   const clienteContextoRegex = /(?:RUC\s*\/\s*CIP|\bCLIENTE\b|DIRECCI[ÓO]N|TEL[ÉE]FONO|\bCJ\s*:|\bCAJERO\b|\bVENDEDOR\b)/i;
   const proveedorEmpresaRegex = /[A-Za-zÁÉÍÓÚÑ]/;
   const proveedorHeadStopRegex = /(?:\bFACTURA\b|\bDOC\s*:|\bFECHA\s*:|\bDESCRIPCI[ÓO]N\b|\bCANT(?:IDAD)?\b|\bPRECIO\b|\bTOTAL\b)/i;
-  const proveedorHeadTokenBlockRegex = /\b(FACTURA|DOC|DOCUMENTO|FECHA|CLIENTE|CAJERO|VENDEDOR|RUC|NIT|DV|ITBMS|IVA|TOTAL|SUBTOTAL|PAGO|CONDICI[ÓO]N|C[ÓO]DIGO|CANTIDAD|DESCRIPCI[ÓO]N|PRECIO)\b/i;
-  const proveedorHeadMoneyRegex = /(?:B\/\.?|USD|\$|\d+[.,]\d{2}|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?)/i;
-  const proveedorHeadSenalRegex = /(?:\bS\.?\s*A\.?\b|\bS\.?\s*R\.?\s*L\.?\b|\bINC\.?\b|\bCORP\.?\b|&\s*C[IÍ]A\b|\bC[IÍ]A\.?\b|^[A-ZÁÉÍÓÚÑ0-9&.,'"\-\/\s]{8,}$)/i;
+  const proveedorOperacionRegex = /\b(FACTURA|DOC|DOCUMENTO|FECHA|CLIENTE|CAJERO|VENDEDOR|RUC|NIT|DV|ITBMS|IVA|TOTAL|SUBTOTAL|PAGO|CONDICI[ÓO]N|C[ÓO]DIGO|CANTIDAD|DESCRIPCI[ÓO]N|PRECIO|UNIDAD|ITEM)\b/i;
+  const proveedorMoneyRegex = /(?:B\/\.?|USD|\$|\d+[.,]\d{2}|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?)/i;
+  const proveedorSocietarioRegex = /\b(S\.?\s*A\.?|CORP\.?|LTDA\.?|INC\.?)\b/i;
+  const proveedorTransaccionalRegex = /\b(VENTA|CONTADO|PAGO|CAJA|CAMBIO)\b/i;
 
-  // init proveedor desde encabezado alto antes de etiquetas ambiguas
+  // score proveedor: prioriza razón social y penaliza líneas operativas/transaccionales
+  function scoreProveedorCandidate(cand, idxLinea) {
+    let score = 0;
+    if (proveedorSocietarioRegex.test(cand)) score += 3;
+    if (idxLinea >= 0 && idxLinea <= 2) score += 3;
+    else if (idxLinea >= 0 && idxLinea <= 5) score += 2;
+    else if (idxLinea >= 0 && idxLinea <= 10) score += 1;
+    if (proveedorTransaccionalRegex.test(cand)) score -= 4;
+    if (proveedorOperacionRegex.test(cand)) score -= 3;
+    if (proveedorMoneyRegex.test(cand)) score -= 2;
+    if (clienteContextoRegex.test(cand)) score -= 3;
+    return score;
+  }
+
   const lineasProveedor = txt.split(/\r?\n/);
-  const topLines = [];
+  const candidatosProveedor = [];
+
+  function agregarCandidatoProveedor(candRaw, idxLinea) {
+    const cand = limpiarTexto(candRaw).replace(/[:;,.]+$/, '');
+    if (!cand) return;
+    if (cand.length < 5 || cand.length > 120) return;
+    if (!proveedorEmpresaRegex.test(cand)) return;
+    const score = scoreProveedorCandidate(cand, idxLinea);
+    candidatosProveedor.push({ valor: cand, score: score });
+  }
+
   for (let i = 0; i < Math.min(25, lineasProveedor.length); i++) {
     const ln = limpiarTexto(lineasProveedor[i]);
     if (!ln) continue;
     if (proveedorHeadStopRegex.test(ln)) break;
-    topLines.push(ln);
-  }
-  for (let i = 0; i < topLines.length; i++) {
-    const cand = topLines[i].replace(/[:;,.]+$/, '');
-    if (cand.length < 5 || cand.length > 120) continue;
-    if (!proveedorEmpresaRegex.test(cand)) continue;
-    if (proveedorHeadMoneyRegex.test(cand)) continue;
-    if (proveedorHeadTokenBlockRegex.test(cand)) continue;
-    if (!proveedorHeadSenalRegex.test(cand)) continue;
-    if (proveedorBloqueadosRegex.test(cand)) continue;
-    if (clienteContextoRegex.test(cand)) continue;
-    data.proveedor = cand;
-    break;
+    agregarCandidatoProveedor(ln, i);
   }
 
   let pm;
-  if (!data.proveedor) {
-    while ((pm = proveedorRegex.exec(txt)) !== null) {
-      const etiqueta = (pm[1] || '').toUpperCase();
-      const cand = limpiarTexto(pm[2]).replace(/[:;,.]+$/, '');
-      if (!cand) continue;
-      if (!proveedorEmpresaRegex.test(cand)) continue;
-      if (proveedorBloqueadosRegex.test(cand)) continue;
+  while ((pm = proveedorRegex.exec(txt)) !== null) {
+    const etiqueta = (pm[1] || '').toUpperCase();
+    const cand = limpiarTexto(pm[2]).replace(/[:;,.]+$/, '');
+    if (!cand || !proveedorEmpresaRegex.test(cand)) continue;
 
-      if (/RAZ[ÓO]N\s+SOCIAL/.test(etiqueta)) {
-        const ini = Math.max(0, pm.index - 120);
-        const fin = Math.min(txt.length, proveedorRegex.lastIndex + 120);
-        const ventana = txt.slice(ini, fin);
-        if (clienteContextoRegex.test(ventana)) continue;
-      }
+    if (/RAZ[ÓO]N\s+SOCIAL/.test(etiqueta)) {
+      const ini = Math.max(0, pm.index - 120);
+      const fin = Math.min(txt.length, proveedorRegex.lastIndex + 120);
+      const ventana = txt.slice(ini, fin);
+      if (clienteContextoRegex.test(ventana)) continue;
+    }
 
-      data.proveedor = cand;
-      break;
+    let idxLinea = -1;
+    const textoPrevio = txt.slice(0, pm.index);
+    if (textoPrevio) idxLinea = textoPrevio.split(/\r?\n/).length - 1;
+    agregarCandidatoProveedor(cand, idxLinea);
+  }
+
+  for (let i = 0; i < Math.min(6, lineasProveedor.length); i++) {
+    const l = limpiarTexto(lineasProveedor[i]);
+    if (l.length >= 5 && l.length <= 120 && /[A-Za-zÁÉÍÓÚÑ]/.test(l) && !/\d{3,}/.test(l)) {
+      agregarCandidatoProveedor(l, i);
     }
   }
-  if (!data.proveedor) {
-    const lineas = txt.split(/\r?\n/);
-    for (let i = 0; i < Math.min(6, lineas.length); i++) {
-      const l = limpiarTexto(lineas[i]);
-      if (l.length >= 5 && l.length <= 120 && /[A-Za-zÁÉÍÓÚÑ]/.test(l) && !/\d{3,}/.test(l)) {
-        data.proveedor = l;
-        break;
-      }
-    }
+
+  const UMBRAL_SCORE_PROVEEDOR = 2;
+  for (let i = 0; i < candidatosProveedor.length; i++) {
+    if (candidatosProveedor[i].score < UMBRAL_SCORE_PROVEEDOR) continue;
+    data.proveedor = candidatosProveedor[i].valor;
+    break;
   }
 
   const cufeMatch = upper.match(/(?:\bCUFE\b[\s:;#-]*)?([A-Z0-9-]{20,120})/);
