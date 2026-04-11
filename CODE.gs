@@ -1,5 +1,6 @@
 const NOMBRE_HOJA_DATOS = 'Datos Facturas';
 const NOMBRE_HOJA_REGISTRO = 'Archivos Procesados';
+const NOMBRE_HOJA_CATALOGO = 'Catalogo Proveedores';
 
 const ENCABEZADOS_DATOS = [
   'Fecha',
@@ -18,6 +19,13 @@ const ENCABEZADOS_DATOS = [
 ];
 
 const ENCABEZADOS_REGISTRO = ['ID Archivo Drive', 'Nombre Archivo', 'Fecha Procesado'];
+const ENCABEZADOS_CATALOGO = [
+  'Proveedor Canonico',
+  'Alias',
+  'RUC',
+  'Tipo Documento Frecuente',
+  'Activo'
+];
 
 function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
   const folder = DriveApp.getFolderById(idCarpetaPdf);
@@ -34,6 +42,7 @@ function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
     NOMBRE_HOJA_REGISTRO,
     ENCABEZADOS_REGISTRO
   );
+  const catalogoProveedores = getCatalogoProveedores(spreadsheet);
 
   const processedFileIds = getProcessedFileIds(processedLogSheet);
   const allPdfs = [];
@@ -52,6 +61,7 @@ function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
     const contexto = construirContextoArchivo(file);
     contexto.dataSheet = dataSheet;
     contexto.processedLogSheet = processedLogSheet;
+    contexto.catalogoProveedores = catalogoProveedores;
 
     try {
       const clasificacion = clasificarDocumento(contexto);
@@ -120,7 +130,8 @@ function construirContextoArchivo(file) {
     tipoDocumento: 'FACTURA',
     clasificacionDocumento: 'PENDIENTE',
     dataSheet: null,
-    processedLogSheet: null
+    processedLogSheet: null,
+    catalogoProveedores: null
   };
 }
 
@@ -296,6 +307,7 @@ function extraerDesdeVision(contexto) {
 function normalizarYValidar(resultado, contexto) {
   const datosBase = resultado.datos || {};
   const proveedor = limpiarTexto(datosBase.proveedor || '');
+  const proveedorNormalizado = normalizarProveedor(proveedor, contexto.catalogoProveedores);
   const proveedorNormalizado = normalizarProveedor(proveedor);
   const validacion = validarResultado(datosBase);
 
@@ -341,9 +353,13 @@ function guardarResultado(resultado, contexto) {
   const sheet = contexto.dataSheet;
   const processedLogSheet = contexto.processedLogSheet;
 
-  if (isDuplicateInvoice(sheet, resultado.cufe, resultado.driveFileId)) {
-    registrarProcesado(processedLogSheet, contexto.fileId, contexto.nombreArchivo);
-    return;
+  const duplicidad = isDuplicateInvoiceAdvanced(sheet, resultado);
+  if (duplicidad.type === 'REAL') {
+    resultado.estado = 'DUPLICADO_REAL';
+    resultado.observaciones = anexarObs(resultado.observaciones, duplicidad.reason);
+  } else if (duplicidad.type === 'POSIBLE') {
+    resultado.estado = 'POSIBLE_DUPLICADO';
+    resultado.observaciones = anexarObs(resultado.observaciones, duplicidad.reason);
   }
 
   const rowData = [
@@ -397,6 +413,41 @@ function getOrCreateProcessedLogSheet(spreadsheet, tabName, headers) {
   }
   ensureHeaders(logSheet, headers);
   return logSheet;
+}
+
+function getCatalogoProveedores(spreadsheet) {
+  let catalogoSheet = spreadsheet.getSheetByName(NOMBRE_HOJA_CATALOGO);
+  if (!catalogoSheet) {
+    catalogoSheet = spreadsheet.insertSheet(NOMBRE_HOJA_CATALOGO);
+  }
+  ensureHeaders(catalogoSheet, ENCABEZADOS_CATALOGO);
+
+  const lastRow = catalogoSheet.getLastRow();
+  const catalogo = { aliasMap: {} };
+  if (lastRow <= 1) return catalogo;
+
+  const values = catalogoSheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CATALOGO.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const canonico = limpiarTexto(values[i][0]);
+    const aliasRaw = limpiarTexto(values[i][1]);
+    const activo = parseBooleanCell(values[i][4]);
+    if (!canonico || !activo) continue;
+
+    const canonicoLimpio = normalizarNombreProveedorBase(canonico);
+    catalogo.aliasMap[canonicoLimpio] = canonicoLimpio;
+
+    if (aliasRaw) {
+      const aliasList = aliasRaw.split(/[|,;\n]/);
+      for (let j = 0; j < aliasList.length; j++) {
+        const aliasLimpio = normalizarNombreProveedorBase(aliasList[j]);
+        if (aliasLimpio) {
+          catalogo.aliasMap[aliasLimpio] = canonicoLimpio;
+        }
+      }
+    }
+  }
+
+  return catalogo;
 }
 
 function ensureHeaders(sheet, headers) {
@@ -669,18 +720,44 @@ function calcularConfianza(data, fuente) {
 }
 
 function isDuplicateInvoice(sheet, cufe, driveFileId) {
+  const result = isDuplicateInvoiceAdvanced(sheet, {
+    cufe: cufe,
+    driveFileId: driveFileId
+  });
+  return result.type === 'REAL';
+}
+
+function isDuplicateInvoiceAdvanced(sheet, data) {
   const lastRow = sheet.getLastRow();
-  if (lastRow <= 1) return false;
+  if (lastRow <= 1) {
+    return { isDuplicate: false, type: 'NONE', reason: '' };
+  }
 
   const values = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+  const incomingFirma = construirFirmaFactura(data);
+
   for (let i = 0; i < values.length; i++) {
     const existingCufe = values[i][5];
     const existingDriveFileId = values[i][11];
-    if ((cufe && existingCufe === cufe) || existingDriveFileId === driveFileId) {
-      return true;
+    if (data.cufe && existingCufe === data.cufe) {
+      return { isDuplicate: true, type: 'REAL', reason: 'CUFE ya registrado' };
+    }
+    if (data.driveFileId && existingDriveFileId === data.driveFileId) {
+      return { isDuplicate: true, type: 'REAL', reason: 'ID de archivo ya registrado' };
+    }
+
+    if (!incomingFirma) continue;
+    const existingFirma = construirFirmaFactura({
+      fecha: values[i][0],
+      proveedorNormalizado: values[i][2],
+      total: values[i][4]
+    });
+    if (existingFirma && existingFirma === incomingFirma) {
+      return { isDuplicate: true, type: 'POSIBLE', reason: 'Coincidencia en firma compuesta' };
     }
   }
-  return false;
+
+  return { isDuplicate: false, type: 'NONE', reason: '' };
 }
 
 function findAllPdfs(folder, pdfFilesArray) {
@@ -701,13 +778,44 @@ function inferirCufeDesdeNombre(nombreArchivo) {
   return base.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-function normalizarProveedor(proveedor) {
-  return proveedor
+function normalizarProveedor(nombreDetectado, catalogo) {
+  const limpio = normalizarNombreProveedorBase(nombreDetectado);
+  if (!limpio) return '';
+  if (catalogo && catalogo.aliasMap && catalogo.aliasMap[limpio]) {
+    return catalogo.aliasMap[limpio];
+  }
+  return limpio;
+}
+
+function construirFirmaFactura(data) {
+  const fecha = normalizarFecha(data.fecha);
+  const proveedor = normalizarNombreProveedorBase(data.proveedorNormalizado || data.proveedor || '');
+  const total = normalizarImporteFirma(data.total);
+  if (!fecha || !proveedor || total === '') return '';
+  return [fecha, proveedor, total].join('|');
+}
+
+function normalizarNombreProveedorBase(value) {
+  return String(value || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[.,;:]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toUpperCase();
+}
+
+function normalizarImporteFirma(value) {
+  const num = toNumber(value);
+  if (num === '') return '';
+  return Number(num).toFixed(2);
+}
+
+function parseBooleanCell(value) {
+  if (typeof value === 'boolean') return value;
+  const txt = limpiarTexto(value).toUpperCase();
+  if (!txt) return false;
+  return txt === 'SI' || txt === 'SÍ' || txt === 'TRUE' || txt === '1' || txt === 'ACTIVO' || txt === 'X';
 }
 
 function limpiarTexto(value) {
