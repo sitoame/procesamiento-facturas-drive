@@ -4,6 +4,7 @@ import base64
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 
 from app.models import InvoiceResult
 
@@ -13,6 +14,17 @@ DATE_PATTERNS = [
     re.compile(r"\b(\d{4}-\d{2}-\d{2})\b"),
     re.compile(r"\b(\d{2}/\d{2}/\d{4})\b"),
     re.compile(r"\b(\d{2}-\d{2}-\d{4})\b"),
+]
+RUC_RE = re.compile(r"\b(\d{5,12}-\d{1,4}-\d{1,6})\b", flags=re.IGNORECASE)
+
+CANONICAL_BY_RUC = {
+    "155701584-2-2021": "MEGA LONG, S.A.",
+}
+
+MEGA_LONG_ALIASES = [
+    "MEGA LOKO",
+    "MEGA LONG PILÓN",
+    "MEGA LONG PILON",
 ]
 
 
@@ -37,7 +49,14 @@ def extract_invoice_fields_from_text(text: str) -> InvoiceResult:
 
     tipo_documento = _find_tipo_documento(text)
     fecha = _find_date(text)
-    proveedor = _find_supplier(text)
+    nombre_marca_detectado = _find_brand_name(text)
+    razon_social_detectada = _find_legal_name(text)
+    ruc_detectado = _find_ruc(text)
+    proveedor, proveedor_match_motivo, proveedor_match_score = _normalize_supplier(
+        ruc=ruc_detectado,
+        razon_social=razon_social_detectada,
+        nombre_marca=nombre_marca_detectado,
+    )
     cufe = _find_cufe(text)
     numero_factura = _find_invoice_number(text)
     total = _find_amount_by_keywords(text, ["total", "importe total", "monto total"])
@@ -45,7 +64,7 @@ def extract_invoice_fields_from_text(text: str) -> InvoiceResult:
 
     found_fields = sum(
         1
-        for v in [tipo_documento, fecha, proveedor, cufe, numero_factura, total, itbms]
+        for v in [tipo_documento, fecha, proveedor, cufe, numero_factura, total, itbms, ruc_detectado]
         if v is not None
     )
     confianza = min(1.0, 0.2 + (found_fields * 0.11))
@@ -57,6 +76,11 @@ def extract_invoice_fields_from_text(text: str) -> InvoiceResult:
         tipo_documento=tipo_documento,
         fecha=fecha,
         proveedor=proveedor,
+        nombre_marca_detectado=nombre_marca_detectado,
+        razon_social_detectada=razon_social_detectada,
+        ruc_detectado=ruc_detectado,
+        proveedor_match_motivo=proveedor_match_motivo,
+        proveedor_match_score=proveedor_match_score,
         itbms=itbms,
         total=total,
         cufe=cufe,
@@ -107,14 +131,54 @@ def _find_date(text: str) -> str | None:
     return None
 
 
-def _find_supplier(text: str) -> str | None:
+def _find_legal_name(text: str) -> str | None:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     header = lines[:12]
     for line in header:
         low = line.lower()
         if any(k in low for k in ["s.a", "s.a.", "corp", "inc", "ltda", "empresa"]):
             return line[:120]
-    return header[0][:120] if header else None
+    return None
+
+
+def _find_brand_name(text: str) -> str | None:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[0][:120] if lines else None
+
+
+def _find_ruc(text: str) -> str | None:
+    match = RUC_RE.search(text)
+    return match.group(1).upper() if match else None
+
+
+def _normalize_supplier(ruc: str | None, razon_social: str | None, nombre_marca: str | None) -> tuple[str | None, str | None, float | None]:
+    if ruc and ruc in CANONICAL_BY_RUC:
+        return CANONICAL_BY_RUC[ruc], "match_ruc_exact", 1.0
+
+    candidates = [v for v in [razon_social, nombre_marca] if v]
+    if not candidates:
+        return None, None, None
+
+    best_score = 0.0
+    best_alias = None
+    for cand in candidates:
+        cand_token = _norm_token(cand)
+        for alias in MEGA_LONG_ALIASES:
+            alias_score = SequenceMatcher(None, cand_token, _norm_token(alias)).ratio()
+            if alias_score > best_score:
+                best_score = alias_score
+                best_alias = alias
+
+    if best_alias and best_score >= 0.86:
+        return "MEGA LONG, S.A.", "match_alias_fuzzy", round(min(0.99, best_score), 4)
+
+    return razon_social or nombre_marca, None, round(best_score, 4) if best_score else None
+
+
+def _norm_token(raw: str) -> str:
+    token = raw.upper().replace("Ó", "O")
+    token = re.sub(r"[^A-Z0-9]+", " ", token)
+    return re.sub(r"\s+", " ", token).strip()
 
 
 def _find_cufe(text: str) -> str | None:

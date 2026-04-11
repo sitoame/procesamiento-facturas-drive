@@ -31,6 +31,11 @@ class InvoiceResult(BaseModel):
     tipo_documento: Optional[str] = None
     fecha: Optional[str] = None
     proveedor: Optional[str] = None
+    nombre_marca_detectado: Optional[str] = None
+    razon_social_detectada: Optional[str] = None
+    ruc_detectado: Optional[str] = None
+    proveedor_match_motivo: Optional[str] = None
+    proveedor_match_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     itbms: Optional[float] = None
     total: Optional[float] = None
     cufe: Optional[str] = None
