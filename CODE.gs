@@ -54,14 +54,35 @@ function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
     contexto.processedLogSheet = processedLogSheet;
 
     try {
-      clasificarDocumento(contexto);
+      const clasificacion = clasificarDocumento(contexto);
 
-      let resultado = extraerDesdeDGI(contexto);
-      if (!resultado.ok) {
-        resultado = extraerDesdeTextoEmbebido(contexto);
-      }
-      if (!resultado.ok) {
+      let resultado;
+      if (clasificacion === 'NO_FISCAL') {
+        resultado = {
+          ok: false,
+          metodoExtraccion: 'CLASIFICADOR',
+          confianza: 0.9,
+          datos: {},
+          observaciones: 'Documento no fiscal detectado por clasificación'
+        };
+      } else if (clasificacion === 'FACTURA_ELECTRONICA_CUFE') {
+        resultado = extraerDesdeDGI(contexto);
+        if (!resultado.ok) {
+          resultado = extraerDesdeTextoEmbebido(contexto);
+        }
+        if (!resultado.ok) {
+          resultado = extraerDesdeVision(contexto);
+        }
+      } else if (clasificacion === 'ESCANEO_O_IMAGEN') {
         resultado = extraerDesdeVision(contexto);
+        if (!resultado.ok) {
+          resultado = extraerDesdeTextoEmbebido(contexto);
+        }
+      } else {
+        resultado = extraerDesdeTextoEmbebido(contexto);
+        if (!resultado.ok) {
+          resultado = extraerDesdeVision(contexto);
+        }
       }
 
       const normalizado = normalizarYValidar(resultado, contexto);
@@ -79,34 +100,73 @@ function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
 }
 
 function construirContextoArchivo(file) {
+  const fileName = file.getName();
+  const nombreArchivoSinExtension = fileName.replace(/\.[^.]+$/i, '');
+  const cufeDetectado = inferirCufeDesdeNombre(fileName);
+
   return {
     file: file,
     fileId: file.getId(),
-    nombreArchivo: file.getName(),
+    fileName: fileName,
+    fileUrl: file.getUrl(),
+    nombreArchivoSinExtension: nombreArchivoSinExtension,
+    mimeType: file.getMimeType(),
+    textoOCR: '',
+    tamañoTextoOCR: 0,
+    esPosibleCUFEEnNombre: pareceCufe(nombreArchivoSinExtension),
+    nombreArchivo: fileName,
     link: file.getUrl(),
-    cufeDetectado: inferirCufeDesdeNombre(file.getName()),
+    cufeDetectado: cufeDetectado,
     tipoDocumento: 'FACTURA',
+    clasificacionDocumento: 'PENDIENTE',
     dataSheet: null,
     processedLogSheet: null
   };
 }
 
 function clasificarDocumento(contexto) {
-  const nombre = contexto.nombreArchivo.toUpperCase();
-  if (/NC|NOTA\s*DE\s*CREDITO/.test(nombre)) {
-    contexto.tipoDocumento = 'NOTA_CREDITO';
-    return contexto.tipoDocumento;
+  // init texto OCR para clasif basada en contenido
+  if (!contexto.textoOCR) {
+    try {
+      contexto.textoOCR = extractTextFromPdf(contexto.fileId) || '';
+    } catch (err) {
+      contexto.textoOCR = '';
+    }
   }
-  if (/ND|NOTA\s*DE\s*DEBITO/.test(nombre)) {
-    contexto.tipoDocumento = 'NOTA_DEBITO';
-    return contexto.tipoDocumento;
+
+  contexto.tamañoTextoOCR = limpiarTexto(contexto.textoOCR).length;
+
+  if (contexto.esPosibleCUFEEnNombre) {
+    contexto.clasificacionDocumento = 'FACTURA_ELECTRONICA_CUFE';
+    contexto.tipoDocumento = 'FACTURA';
+    return contexto.clasificacionDocumento;
   }
+
+  if (textoPareceNoFiscal(contexto.textoOCR)) {
+    contexto.clasificacionDocumento = 'NO_FISCAL';
+    contexto.tipoDocumento = 'NO_FISCAL';
+    return contexto.clasificacionDocumento;
+  }
+
+  if (textoTieneIndicadoresDeFactura(contexto.textoOCR)) {
+    contexto.clasificacionDocumento = 'PDF_TEXTO';
+    contexto.tipoDocumento = 'FACTURA';
+    return contexto.clasificacionDocumento;
+  }
+
+  if (textoEsInsuficiente(contexto.textoOCR)) {
+    contexto.clasificacionDocumento = 'ESCANEO_O_IMAGEN';
+    contexto.tipoDocumento = 'FACTURA';
+    return contexto.clasificacionDocumento;
+  }
+
+  contexto.clasificacionDocumento = 'PDF_TEXTO';
   contexto.tipoDocumento = 'FACTURA';
-  return contexto.tipoDocumento;
+  return contexto.clasificacionDocumento;
 }
 
 function extraerDesdeDGI(contexto) {
-  if (!contexto.cufeDetectado) {
+  if (contexto.clasificacionDocumento !== 'FACTURA_ELECTRONICA_CUFE' || !contexto.cufeDetectado) {
     return { ok: false, metodoExtraccion: 'DGI', confianza: 0, observaciones: 'CUFE ausente en nombre de archivo' };
   }
 
@@ -133,7 +193,7 @@ function extraerDesdeDGI(contexto) {
 
 function extraerDesdeTextoEmbebido(contexto) {
   try {
-    const texto = extractTextFromPdf(contexto.fileId);
+    const texto = contexto.textoOCR || extractTextFromPdf(contexto.fileId);
     if (!texto) {
       return { ok: false, metodoExtraccion: 'OCR_DRIVE', confianza: 0, observaciones: 'Sin texto extraído' };
     }
@@ -155,6 +215,69 @@ function extraerDesdeTextoEmbebido(contexto) {
       observaciones: 'Fallo OCR: ' + err.message
     };
   }
+}
+
+function pareceCufe(nombre) {
+  const limpio = limpiarTexto(nombre).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!/^FE[A-Z0-9]{18,120}$/.test(limpio)) {
+    return false;
+  }
+  return /\d/.test(limpio.slice(2));
+}
+
+function textoTieneIndicadoresDeFactura(texto) {
+  const base = limpiarTexto(texto).toUpperCase();
+  if (!base) return false;
+
+  const indicadores = [
+    'FECHA DE EMISION',
+    'CUFE',
+    'EMISOR',
+    'VALOR TOTAL',
+    'ITBMS'
+  ];
+
+  let hits = 0;
+  for (let i = 0; i < indicadores.length; i++) {
+    if (base.indexOf(indicadores[i]) > -1) hits++;
+  }
+
+  // 2+ indicadores reduce falsos positivos en OCR ruidoso
+  return hits >= 2;
+}
+
+function textoPareceNoFiscal(texto) {
+  const base = limpiarTexto(texto).toUpperCase();
+  if (!base) return false;
+  return /(ORDEN\s+DE\s+PEDIDO|COTIZACI[ÓO]N|PROFORMA)/i.test(base);
+}
+
+function textoEsInsuficiente(texto) {
+  const raw = String(texto || '');
+  const limpio = limpiarTexto(raw);
+  if (!limpio) return true;
+
+  const minChars = 80;
+  if (limpio.length < minChars) return true;
+
+  const sinEspacios = limpio.replace(/\s/g, '');
+  const alnum = sinEspacios.replace(/[^A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ]/g, '');
+  const ratioAlnum = sinEspacios.length > 0 ? alnum.length / sinEspacios.length : 0;
+
+  // ratio bajo suele indicar OCR con símbolos/ruido
+  if (ratioAlnum < 0.55) return true;
+
+  const tokens = limpio.split(/\s+/);
+  const unicos = {};
+  for (let i = 0; i < tokens.length; i++) {
+    unicos[tokens[i]] = true;
+  }
+  const diversidad = Object.keys(unicos).length / Math.max(tokens.length, 1);
+
+  // diversidad extrema baja sugiere texto repetitivo por OCR defectuoso
+  if (tokens.length >= 20 && diversidad < 0.2) return true;
+
+  return false;
 }
 
 function extraerDesdeVision(contexto) {
@@ -375,8 +498,8 @@ function findAllPdfs(folder, pdfFilesArray) {
 
 function inferirCufeDesdeNombre(nombreArchivo) {
   const base = nombreArchivo.replace(/\.pdf$/i, '');
-  if (base.length < 10) return '';
-  return base;
+  if (!pareceCufe(base)) return '';
+  return base.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
 function normalizarProveedor(proveedor) {
