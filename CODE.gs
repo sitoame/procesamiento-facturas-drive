@@ -35,9 +35,6 @@ const ENCABEZADOS_CATALOGO = [
   'Tipo Documento Frecuente',
   'Activo'
 ];
-const PROVEEDOR_CANONICO_WEIDER = 'WEIDER, S.A.';
-const ALIAS_WEIDER = ['WEIDER SA', 'WEIDER S A', 'WEIDER,S.A', 'VENTA CONTADO'];
-
 function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
   const folder = DriveApp.getFolderById(idCarpetaPdf);
   const spreadsheet = getOrCreateSpreadsheet(
@@ -529,50 +526,27 @@ function getCatalogoProveedores(spreadsheet) {
     catalogoSheet = spreadsheet.insertSheet(NOMBRE_HOJA_CATALOGO);
   }
   ensureHeaders(catalogoSheet, ENCABEZADOS_CATALOGO);
-  ensureProveedorCatalogo(catalogoSheet, PROVEEDOR_CANONICO_WEIDER, ALIAS_WEIDER);
-
-  const lastRow = catalogoSheet.getLastRow();
-  const catalogo = { aliasMap: {}, rucMap: {} };
-  if (lastRow <= 1) return catalogo;
-
-  const values = catalogoSheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CATALOGO.length).getValues();
-  for (let i = 0; i < values.length; i++) {
-    const canonico = limpiarTexto(values[i][0]);
-    const aliasRaw = limpiarTexto(values[i][1]);
-    const rucRaw = limpiarTexto(values[i][2]);
-    const activo = parseBooleanCell(values[i][4]);
-    if (!canonico || !activo) continue;
-
-    const canonicoLimpio = normalizarNombreProveedorBase(canonico);
-    const canonicoOficial = limpiarTexto(canonico);
-    catalogo.aliasMap[canonicoLimpio] = canonicoOficial;
-    const rucNorm = normalizarRuc(rucRaw);
-    if (rucNorm) {
-      catalogo.rucMap[rucNorm] = canonicoOficial;
-    }
-
-    if (aliasRaw) {
-      const aliasList = aliasRaw.split(/[|,;\n]/);
-      for (let j = 0; j < aliasList.length; j++) {
-        const aliasLimpio = normalizarNombreProveedorBase(aliasList[j]);
-        if (aliasLimpio) {
-          catalogo.aliasMap[aliasLimpio] = canonicoOficial;
-        }
-      }
-    }
+  const proveedoresBase = obtenerDiccionarioProveedores();
+  for (let i = 0; i < proveedoresBase.length; i++) {
+    const proveedor = proveedoresBase[i];
+    ensureProveedorCatalogo(catalogoSheet, proveedor.canonico, proveedor.aliases, proveedor.ruc);
   }
 
-  return catalogo;
+  const lastRow = catalogoSheet.getLastRow();
+  if (lastRow <= 1) return { aliasMap: {}, rucMap: {} };
+
+  const values = catalogoSheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CATALOGO.length).getValues();
+  return construirMapasCatalogoProveedores(values);
 }
 
-function ensureProveedorCatalogo(sheet, proveedorCanonico, aliases) {
-  const aliasList = aliases.filter(function (alias) { return limpiarTexto(alias); });
+function ensureProveedorCatalogo(sheet, proveedorCanonico, aliases, ruc) {
+  const aliasList = (aliases || []).filter(function (alias) { return limpiarTexto(alias); });
   const aliasRaw = aliasList.join(' | ');
   const canonicoNormalizado = normalizarNombreProveedorBase(proveedorCanonico);
   const lastRow = sheet.getLastRow();
 
   if (lastRow <= 1) {
-    sheet.appendRow([proveedorCanonico, aliasRaw, '', '', 'SI']);
+    sheet.appendRow([proveedorCanonico, aliasRaw, limpiarTexto(ruc), '', 'SI']);
     return;
   }
 
@@ -587,12 +561,13 @@ function ensureProveedorCatalogo(sheet, proveedorCanonico, aliases) {
   }
 
   if (rowIndex === -1) {
-    sheet.appendRow([proveedorCanonico, aliasRaw, '', '', 'SI']);
+    sheet.appendRow([proveedorCanonico, aliasRaw, limpiarTexto(ruc), '', 'SI']);
     return;
   }
 
   const current = sheet.getRange(rowIndex, 1, 1, ENCABEZADOS_CATALOGO.length).getValues()[0];
-  const next = [proveedorCanonico, aliasRaw, current[2] || '', current[3] || '', 'SI'];
+  const rucFinal = limpiarTexto(ruc) || current[2] || '';
+  const next = [proveedorCanonico, aliasRaw, rucFinal, current[3] || '', 'SI'];
   sheet.getRange(rowIndex, 1, 1, ENCABEZADOS_CATALOGO.length).setValues([next]);
 }
 
