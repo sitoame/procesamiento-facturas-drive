@@ -1,6 +1,7 @@
 const NOMBRE_HOJA_DATOS = 'Datos Facturas';
 const NOMBRE_HOJA_REGISTRO = 'Archivos Procesados';
 const NOMBRE_HOJA_CATALOGO = 'Catalogo Proveedores';
+const NOMBRE_HOJA_CARPETAS = 'Carpetas Procesadas';
 
 const ENCABEZADOS_DATOS = [
   'Fecha',
@@ -19,6 +20,14 @@ const ENCABEZADOS_DATOS = [
 ];
 
 const ENCABEZADOS_REGISTRO = ['ID Archivo Drive', 'Nombre Archivo', 'Fecha Procesado'];
+const ENCABEZADOS_CARPETAS = [
+  'Folder ID',
+  'Ultimo Checkpoint',
+  'Ultimo Conteo PDF',
+  'Ultima Ejecucion',
+  'Estado',
+  'Observaciones'
+];
 const ENCABEZADOS_CATALOGO = [
   'Proveedor Canonico',
   'Alias',
@@ -44,68 +53,77 @@ function procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo) {
     NOMBRE_HOJA_REGISTRO,
     ENCABEZADOS_REGISTRO
   );
+  const folderCheckpointSheet = getOrCreateFolderCheckpointSheet(
+    spreadsheet,
+    NOMBRE_HOJA_CARPETAS,
+    ENCABEZADOS_CARPETAS
+  );
   const catalogoProveedores = getCatalogoProveedores(spreadsheet);
 
   const processedFileIds = getProcessedFileIds(processedLogSheet);
-  const allPdfs = [];
-  findAllPdfs(folder, allPdfs);
-
+  const checkpointCtx = createFolderCheckpointContext(folderCheckpointSheet);
   let nuevosProcesados = 0;
 
-  for (let i = 0; i < allPdfs.length; i++) {
-    const file = allPdfs[i];
-    const fileId = file.getId();
+  try {
+    const allPdfs = collectPdfsWithCheckpoint(folder, checkpointCtx);
 
-    if (processedFileIds.has(fileId)) {
-      continue;
-    }
+    for (let i = 0; i < allPdfs.length; i++) {
+      const file = allPdfs[i];
+      const fileId = file.getId();
 
-    const contexto = construirContextoArchivo(file);
-    contexto.dataSheet = dataSheet;
-    contexto.processedLogSheet = processedLogSheet;
-    contexto.catalogoProveedores = catalogoProveedores;
-
-    try {
-      const clasificacion = clasificarDocumento(contexto);
-
-      let resultado;
-      if (clasificacion === 'NO_FISCAL') {
-        resultado = {
-          ok: false,
-          metodoExtraccion: 'CLASIFICADOR',
-          confianza: 0.9,
-          datos: {},
-          observaciones: 'Documento no fiscal detectado por clasificación'
-        };
-      } else if (clasificacion === 'FACTURA_ELECTRONICA_CUFE') {
-        resultado = extraerDesdeDGI(contexto);
-        if (!resultado.ok) {
-          resultado = extraerDesdeTextoEmbebido(contexto);
-        }
-        if (!resultado.ok) {
-          resultado = extraerDesdeVision(contexto);
-        }
-      } else if (clasificacion === 'ESCANEO_O_IMAGEN') {
-        resultado = extraerDesdeVision(contexto);
-        if (!resultado.ok) {
-          resultado = extraerDesdeTextoEmbebido(contexto);
-        }
-      } else {
-        resultado = extraerDesdeTextoEmbebido(contexto);
-        if (!resultado.ok) {
-          resultado = extraerDesdeVision(contexto);
-        }
+      if (processedFileIds.has(fileId)) {
+        continue;
       }
 
-      const normalizado = normalizarYValidar(resultado, contexto);
-      guardarResultado(normalizado, contexto);
-      processedFileIds.add(fileId);
-      nuevosProcesados++;
-    } catch (err) {
-      Logger.log('Error en archivo ' + file.getName() + ' (' + fileId + '): ' + err.message);
-      registrarProcesado(processedLogSheet, fileId, file.getName());
-      processedFileIds.add(fileId);
+      const contexto = construirContextoArchivo(file);
+      contexto.dataSheet = dataSheet;
+      contexto.processedLogSheet = processedLogSheet;
+      contexto.catalogoProveedores = catalogoProveedores;
+
+      try {
+        const clasificacion = clasificarDocumento(contexto);
+
+        let resultado;
+        if (clasificacion === 'NO_FISCAL') {
+          resultado = {
+            ok: false,
+            metodoExtraccion: 'CLASIFICADOR',
+            confianza: 0.9,
+            datos: {},
+            observaciones: 'Documento no fiscal detectado por clasificación'
+          };
+        } else if (clasificacion === 'FACTURA_ELECTRONICA_CUFE') {
+          resultado = extraerDesdeDGI(contexto);
+          if (!resultado.ok) {
+            resultado = extraerDesdeTextoEmbebido(contexto);
+          }
+          if (!resultado.ok) {
+            resultado = extraerDesdeVision(contexto);
+          }
+        } else if (clasificacion === 'ESCANEO_O_IMAGEN') {
+          resultado = extraerDesdeVision(contexto);
+          if (!resultado.ok) {
+            resultado = extraerDesdeTextoEmbebido(contexto);
+          }
+        } else {
+          resultado = extraerDesdeTextoEmbebido(contexto);
+          if (!resultado.ok) {
+            resultado = extraerDesdeVision(contexto);
+          }
+        }
+
+        const normalizado = normalizarYValidar(resultado, contexto);
+        guardarResultado(normalizado, contexto);
+        processedFileIds.add(fileId);
+        nuevosProcesados++;
+      } catch (err) {
+        Logger.log('Error en archivo ' + file.getName() + ' (' + fileId + '): ' + err.message);
+        registrarProcesado(processedLogSheet, fileId, file.getName());
+        processedFileIds.add(fileId);
+      }
     }
+  } finally {
+    flushFolderCheckpointContext(checkpointCtx);
   }
 
   Logger.log('Proceso finalizado. Archivos nuevos procesados: ' + nuevosProcesados);
@@ -496,6 +514,15 @@ function getOrCreateProcessedLogSheet(spreadsheet, tabName, headers) {
   return logSheet;
 }
 
+function getOrCreateFolderCheckpointSheet(spreadsheet, tabName, headers) {
+  let checkpointSheet = spreadsheet.getSheetByName(tabName);
+  if (!checkpointSheet) {
+    checkpointSheet = spreadsheet.insertSheet(tabName);
+  }
+  ensureHeaders(checkpointSheet, headers);
+  return checkpointSheet;
+}
+
 function getCatalogoProveedores(spreadsheet) {
   let catalogoSheet = spreadsheet.getSheetByName(NOMBRE_HOJA_CATALOGO);
   if (!catalogoSheet) {
@@ -606,6 +633,88 @@ function getProcessedFileIds(processedLogSheet) {
 
 function registrarProcesado(processedLogSheet, fileId, fileName) {
   processedLogSheet.appendRow([fileId, fileName, new Date()]);
+}
+
+function createFolderCheckpointContext(checkpointSheet) {
+  const checkpoints = loadFolderCheckpoints(checkpointSheet);
+  return {
+    sheet: checkpointSheet,
+    checkpoints: checkpoints,
+    updates: {}
+  };
+}
+
+function loadFolderCheckpoints(checkpointSheet) {
+  const checkpointMap = {};
+  const lastRow = checkpointSheet.getLastRow();
+  if (lastRow <= 1) return checkpointMap;
+
+  const values = checkpointSheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CARPETAS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const folderId = String(values[i][0] || '').trim();
+    if (!folderId) continue;
+    checkpointMap[folderId] = {
+      rowIndex: i + 2,
+      folderId: folderId,
+      ultimoCheckpoint: Number(values[i][1] || 0),
+      ultimoConteoPdf: Number(values[i][2] || 0),
+      ultimaEjecucion: values[i][3] || '',
+      estado: values[i][4] || '',
+      observaciones: values[i][5] || ''
+    };
+  }
+  return checkpointMap;
+}
+
+function flushFolderCheckpointContext(checkpointCtx) {
+  const updates = checkpointCtx.updates;
+  const folderIds = Object.keys(updates);
+  if (folderIds.length === 0) return;
+
+  const rowsByIndex = {};
+  for (let i = 0; i < folderIds.length; i++) {
+    const folderId = folderIds[i];
+    const record = updates[folderId];
+    const existing = checkpointCtx.checkpoints[folderId];
+    const rowIndex = existing ? existing.rowIndex : checkpointCtx.sheet.getLastRow() + 1;
+    rowsByIndex[rowIndex] = [
+      folderId,
+      record.ultimoCheckpoint,
+      record.ultimoConteoPdf,
+      record.ultimaEjecucion,
+      record.estado,
+      record.observaciones
+    ];
+    checkpointCtx.checkpoints[folderId] = {
+      rowIndex: rowIndex,
+      folderId: folderId,
+      ultimoCheckpoint: record.ultimoCheckpoint,
+      ultimoConteoPdf: record.ultimoConteoPdf,
+      ultimaEjecucion: record.ultimaEjecucion,
+      estado: record.estado,
+      observaciones: record.observaciones
+    };
+  }
+
+  const entries = Object.keys(rowsByIndex)
+    .map(function (idx) { return { row: Number(idx), values: rowsByIndex[idx] }; })
+    .sort(function (a, b) { return a.row - b.row; });
+
+  let chunkStart = entries[0].row;
+  let chunkValues = [entries[0].values];
+  for (let i = 1; i < entries.length; i++) {
+    const prev = entries[i - 1];
+    const cur = entries[i];
+    if (cur.row === prev.row + 1) {
+      chunkValues.push(cur.values);
+      continue;
+    }
+    checkpointCtx.sheet.getRange(chunkStart, 1, chunkValues.length, ENCABEZADOS_CARPETAS.length).setValues(chunkValues);
+    chunkStart = cur.row;
+    chunkValues = [cur.values];
+  }
+  checkpointCtx.sheet.getRange(chunkStart, 1, chunkValues.length, ENCABEZADOS_CARPETAS.length).setValues(chunkValues);
+  checkpointCtx.updates = {};
 }
 
 function extractTextFromPdf(fileId) {
@@ -909,16 +1018,93 @@ function isDuplicateInvoiceAdvanced(sheet, data) {
   return { isDuplicate: false, type: 'NONE', reason: '' };
 }
 
-function findAllPdfs(folder, pdfFilesArray) {
-  const files = folder.getFilesByType(MimeType.PDF);
-  while (files.hasNext()) {
-    pdfFilesArray.push(files.next());
+function collectPdfsWithCheckpoint(rootFolder, checkpointCtx) {
+  const files = [];
+  collectPdfsFromFolder(rootFolder, checkpointCtx, files);
+  return files;
+}
+
+function collectPdfsFromFolder(folder, checkpointCtx, accFiles) {
+  const folderId = folder.getId();
+  const folderSignal = buildFolderSignal(folder);
+  const decision = shouldProcessFolder(folderId, folderSignal, checkpointCtx.checkpoints[folderId]);
+
+  if (!decision.shouldProcess) {
+    checkpointCtx.updates[folderId] = buildCheckpointRecord(folderSignal, 'SKIP', decision.reason);
+    return;
   }
 
-  const subFolders = folder.getFolders();
-  while (subFolders.hasNext()) {
-    findAllPdfs(subFolders.next(), pdfFilesArray);
+  try {
+    const files = folder.getFilesByType(MimeType.PDF);
+    while (files.hasNext()) {
+      accFiles.push(files.next());
+    }
+
+    const subFolders = folder.getFolders();
+    while (subFolders.hasNext()) {
+      collectPdfsFromFolder(subFolders.next(), checkpointCtx, accFiles);
+    }
+
+    checkpointCtx.updates[folderId] = buildCheckpointRecord(folderSignal, 'OK', decision.reason);
+  } catch (err) {
+    checkpointCtx.updates[folderId] = buildCheckpointRecord(
+      folderSignal,
+      'REINTENTO',
+      'error_scan: ' + (err && err.message ? err.message : String(err))
+    );
+    throw err;
   }
+}
+
+function buildFolderSignal(folder) {
+  return {
+    checkpoint: getFolderLastUpdatedMs(folder),
+    pdfCount: countDirectPdfFiles(folder)
+  };
+}
+
+function shouldProcessFolder(folderId, folderSignal, checkpointRow) {
+  // val input
+  if (!checkpointRow) return { shouldProcess: true, reason: 'sin_checkpoint' };
+  if (checkpointRow.estado === 'REINTENTO') return { shouldProcess: true, reason: 'estado_reintento' };
+  if (!folderSignal.checkpoint) return { shouldProcess: true, reason: 'checkpoint_no_disponible' };
+  if (checkpointRow.ultimoCheckpoint !== folderSignal.checkpoint) {
+    return { shouldProcess: true, reason: 'checkpoint_distinto' };
+  }
+  if (checkpointRow.ultimoConteoPdf !== folderSignal.pdfCount) {
+    return { shouldProcess: true, reason: 'conteo_distinto' };
+  }
+  return { shouldProcess: false, reason: 'sin_cambios' };
+}
+
+function buildCheckpointRecord(folderSignal, estado, observaciones) {
+  return {
+    ultimoCheckpoint: folderSignal.checkpoint,
+    ultimoConteoPdf: folderSignal.pdfCount,
+    ultimaEjecucion: new Date(),
+    estado: estado,
+    observaciones: observaciones || ''
+  };
+}
+
+function getFolderLastUpdatedMs(folder) {
+  try {
+    const updated = folder.getLastUpdated();
+    if (!updated) return 0;
+    return updated.getTime();
+  } catch (err) {
+    return 0;
+  }
+}
+
+function countDirectPdfFiles(folder) {
+  let count = 0;
+  const files = folder.getFilesByType(MimeType.PDF);
+  while (files.hasNext()) {
+    files.next();
+    count++;
+  }
+  return count;
 }
 
 function inferirCufeDesdeNombre(nombreArchivo) {
