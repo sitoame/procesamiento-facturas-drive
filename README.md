@@ -1,25 +1,22 @@
 # Backend de extracción de facturas (FastAPI)
 
-Servicio HTTP en Python para recibir PDFs/imágenes en base64 y devolver JSON estructurado para consumo desde Google Apps Script.
+Servicio HTTP para recibir PDFs/imágenes en base64 y devolver JSON estructurado.
 
-## Estructura
+## Arquitectura limpia
 
-```text
-.
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── models.py
-│   ├── core/
-│   │   └── __init__.py
-│   └── services/
-│       ├── __init__.py
-│       ├── document.py
-│       ├── parsing.py
-│       └── pipeline.py
-├── requirements.txt
-└── README.md
-```
+- **Entrada (API):** `app/main.py`
+- **Dominio (reglas):** `app/domain/*`
+- **Infraestructura (OCR/CUFE):** `app/infrastructure/*`
+- **Orquestación pipeline:** `app/services/pipeline.py`
+
+## Reglas críticas conservadas
+
+- Método de extracción: `ocr` o `consulta_cufe`.
+- Confianza: `consulta_cufe` siempre retorna `1.0`.
+- Proveedor solo se escribe si hay match de catálogo.
+- OCR:
+  - `total > 1000` se invalida.
+  - `itbms > 7% del total` se invalida.
 
 ## Arranque local
 
@@ -30,17 +27,15 @@ pip install -r requirements.txt
 make run
 ```
 
-### Error común: `ModuleNotFoundError: No module named "app"`
+## Tests
 
-Este error aparece cuando Uvicorn se ejecuta fuera de la raíz del repo.
-
-- Ejecuta siempre desde la raíz del proyecto: `make run`.
-- Si prefieres comando directo: `python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --app-dir .`
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
 
 ## Endpoint
 
-- `POST /extract-invoice`
-- Payload esperado:
+`POST /extract-invoice`
 
 ```json
 {
@@ -51,32 +46,4 @@ Este error aparece cuando Uvicorn se ejecuta fuera de la raíz del repo.
 }
 ```
 
-## Probar con curl
-
-### 1) Generar base64 de un archivo
-
-```bash
-BASE64_CONTENT=$(base64 -w 0 ./ejemplo.pdf)
-```
-
-> En macOS usa: `base64 ./ejemplo.pdf | tr -d '\n'`
-
-### 2) Ejecutar request
-
-```bash
-curl -X POST "http://localhost:8000/extract-invoice" \
-  -H "Content-Type: application/json" \
-  -d "{\"fileName\":\"ejemplo.pdf\",\"mimeType\":\"application/pdf\",\"contentBase64\":\"${BASE64_CONTENT}\",\"driveFileId\":\"abc123\"}"
-```
-
-### 3) Health check
-
-```bash
-curl "http://localhost:8000/health"
-```
-
-## Notas técnicas
-
-- El flujo OCR está preparado vía `run_ocr_stub` para conectar un motor real (Tesseract, visión documental o multimodal).
-- Si el OCR no está conectado, se usa fallback heurístico sobre texto detectado (en PDF, `pypdf` como extracción inicial).
-- Se incluyen validaciones de entrada, normalización y validación semántica del resultado.
+Respuesta incluye `data.metodo_extraccion` y métricas en `meta.metrics`.

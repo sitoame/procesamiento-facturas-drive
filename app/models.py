@@ -40,6 +40,7 @@ class InvoiceResult(BaseModel):
     total: Optional[float] = None
     cufe: Optional[str] = None
     numero_factura: Optional[str] = None
+    metodo_extraccion: str = Field(default="ocr")
     confianza: float = Field(..., ge=0.0, le=1.0)
     observaciones: list[str] = Field(default_factory=list)
     texto_detectado: Optional[str] = None

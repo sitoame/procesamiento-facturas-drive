@@ -20,6 +20,15 @@ class SupplierNormalizationTests(unittest.TestCase):
         self.assertEqual(result.proveedor_match_motivo, "match_ruc_exact")
         self.assertEqual(result.proveedor_match_score, 1.0)
 
+    def test_no_match_leaves_supplier_empty(self) -> None:
+        ocr_text = """
+        Negocio sin catálogo
+        FACTURA #X-1
+        Total: 25.00
+        """
+        result = extract_invoice_fields_from_text(ocr_text)
+        self.assertIsNone(result.proveedor)
+
 
 if __name__ == "__main__":
     unittest.main()

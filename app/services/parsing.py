@@ -4,9 +4,10 @@ import base64
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+
+from app.domain.invoice_rules import validate_ocr_amounts
 from app.models import InvoiceResult
 from app.services.supplier_catalog import normalize_supplier_from_catalog
-
 
 MONEY_TOKEN_RE = re.compile(r"(?:\$\s*)?([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2}))")
 DATE_PATTERNS = [
@@ -34,7 +35,7 @@ def extract_invoice_fields_from_text(text: str) -> InvoiceResult:
     obs: list[str] = []
 
     if not text:
-        return InvoiceResult(confianza=0.0, observaciones=["No se detectó texto"])  # fallback
+        return InvoiceResult(confianza=0.0, observaciones=["No se detectó texto"], metodo_extraccion="ocr")
 
     tipo_documento = _find_tipo_documento(text)
     fecha = _find_date(text)
@@ -74,13 +75,14 @@ def extract_invoice_fields_from_text(text: str) -> InvoiceResult:
         total=total,
         cufe=cufe,
         numero_factura=numero_factura,
+        metodo_extraccion="ocr",
         confianza=round(confianza, 2),
         observaciones=obs,
         texto_detectado=text,
     )
 
 
-def validate_invoice_result(result: InvoiceResult) -> InvoiceResult:
+def validate_invoice_result(result: InvoiceResult) -> tuple[InvoiceResult, dict[str, bool]]:
     # val semantic
     if result.total is not None and result.total < 0:
         result.observaciones.append("Total inválido; se ajusta a nulo")
@@ -90,13 +92,24 @@ def validate_invoice_result(result: InvoiceResult) -> InvoiceResult:
         result.observaciones.append("ITBMS inválido; se ajusta a nulo")
         result.itbms = None
 
+    metrics = {"invalid_total": False, "invalid_itbms": False}
+    if result.metodo_extraccion == "ocr":
+        total, itbms, obs, rule_metrics = validate_ocr_amounts(result.total, result.itbms)
+        result.total = total
+        result.itbms = itbms
+        result.observaciones.extend(obs)
+        metrics = {
+            "invalid_total": rule_metrics.invalid_total,
+            "invalid_itbms": rule_metrics.invalid_itbms,
+        }
+
     if result.itbms is not None and result.total is not None and result.itbms > result.total:
         result.observaciones.append("ITBMS mayor al total; revisar fuente")
 
     if result.fecha and not _is_valid_date(result.fecha):
         result.observaciones.append("Fecha con formato no estandarizado")
 
-    return result
+    return result, metrics
 
 
 def _find_tipo_documento(text: str) -> str | None:
