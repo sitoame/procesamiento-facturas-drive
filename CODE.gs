@@ -424,9 +424,6 @@ function normalizarYValidar(resultado, contexto) {
     return salida;
   }
 
-  if (resolucionProveedor.fuenteResolucion === 'match_ruc_exact') {
-    salida.observaciones = anexarObs(salida.observaciones, 'fuente_resolucion=match_ruc_exact');
-  }
 
   if (!resultado.ok && salida.estado === 'OK') {
     salida.estado = 'REVISION_MANUAL';
@@ -1098,21 +1095,10 @@ function normalizarProveedor(nombreDetectado, catalogo) {
 
 function resolverProveedorCanonico(input) {
   const nombreDetectado = input && input.nombreDetectado ? input.nombreDetectado : '';
-  const rucDetectado = input && input.rucDetectado ? input.rucDetectado : '';
   const catalogo = input && input.catalogo ? input.catalogo : null;
   const limpio = normalizarNombreProveedorBase(nombreDetectado);
-  const rucNorm = normalizarRuc(rucDetectado);
 
-  // lvl 1: match exacto por RUC activo
-  if (rucNorm && catalogo && catalogo.rucMap && catalogo.rucMap[rucNorm]) {
-    return {
-      proveedorNormalizado: catalogo.rucMap[rucNorm],
-      fuenteResolucion: 'match_ruc_exact'
-    };
-  }
-
-  // fallback por alias/nombre solo si no hay RUC usable
-  if (!rucNorm && limpio && catalogo && catalogo.aliasMap && catalogo.aliasMap[limpio]) {
+  if (limpio && catalogo && catalogo.aliasMap && catalogo.aliasMap[limpio]) {
     return {
       proveedorNormalizado: catalogo.aliasMap[limpio],
       fuenteResolucion: 'match_alias'
@@ -1198,10 +1184,9 @@ function anexarObs(base, extra) {
   return b + ' | ' + extra;
 }
 
-function test_regresion_match_ruc_exact_prioriza_sobre_alias() {
+function test_regresion_match_alias_aun_con_ruc_detectado() {
   const texto = [
     '1114277-1-562914',
-    'DISTRIBUIDORA LA CARRETILLA',
     'VENTA CONTADO',
     'TOTAL B/. 10.00'
   ].join('\n');
@@ -1212,7 +1197,7 @@ function test_regresion_match_ruc_exact_prioriza_sobre_alias() {
       'VENTA CONTADO': 'WEIDER, S.A.'
     },
     rucMap: {
-      '1114277-1-562914': 'WEIDER, S.A.'
+      '1114277-1-562914': 'OTRO PROVEEDOR, S.A.'
     }
   };
 
@@ -1239,8 +1224,5 @@ function test_regresion_match_ruc_exact_prioriza_sobre_alias() {
 
   if (salida.proveedorNormalizado !== 'WEIDER, S.A.') {
     throw new Error('Esperado proveedor canónico WEIDER, S.A., recibido: ' + salida.proveedorNormalizado);
-  }
-  if (salida.observaciones.indexOf('fuente_resolucion=match_ruc_exact') === -1) {
-    throw new Error('No se registró la fuente match_ruc_exact en observaciones');
   }
 }
