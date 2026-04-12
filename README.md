@@ -1,49 +1,28 @@
-# Backend de extracción de facturas (FastAPI)
+# Procesamiento de facturas en Google Apps Script
 
-Servicio HTTP para recibir PDFs/imágenes en base64 y devolver JSON estructurado.
+Automatización para procesar PDFs en Drive, extraer datos de factura y registrar resultados en Google Sheets.
 
-## Arquitectura limpia
+## Feats críticas implementadas
 
-- **Entrada (API):** `app/main.py`
-- **Dominio (reglas):** `app/domain/*`
-- **Infraestructura (OCR/CUFE):** `app/infrastructure/*`
-- **Orquestación pipeline:** `app/services/pipeline.py`
+- `Metodo Extraccion` solo usa valores:
+  - `ocr`
+  - `consulta_cufe`
+- `Confianza`:
+  - `consulta_cufe` => `1`
+  - `ocr` => score heurístico
+- Proveedor:
+  - solo se escribe si hay match con catálogo (alias o RUC)
+  - sin match, proveedor vacío
+- Validaciones en `ocr`:
+  - `total > 1000` => se invalida (vacío)
+  - `itbms > 7% del total` => se invalida (vacío)
+- Flujo de carpeta procesada conservado:
+  - registro de archivos procesados
+  - checkpoints por carpeta
 
-## Reglas críticas conservadas
+## Entry points
 
-- Método de extracción: `ocr` o `consulta_cufe`.
-- Confianza: `consulta_cufe` siempre retorna `1.0`.
-- Proveedor solo se escribe si hay match de catálogo.
-- OCR:
-  - `total > 1000` se invalida.
-  - `itbms > 7% del total` se invalida.
+Funciones en `CONFIGURACION.gs`:
+- `ENSA`, `FONDOS_COMERCIALES`, `PROSERV`, `MINIDEPOSITOS`, `FUMIEXPRESS`, `LADOÑA`, `multicarpetas`, `FACTURAS`.
 
-## Arranque local
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-make run
-```
-
-## Tests
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-## Endpoint
-
-`POST /extract-invoice`
-
-```json
-{
-  "fileName": "archivo.pdf",
-  "mimeType": "application/pdf",
-  "contentBase64": "...",
-  "driveFileId": "abc123"
-}
-```
-
-Respuesta incluye `data.metodo_extraccion` y métricas en `meta.metrics`.
+Todas delegan en `procesarNuevosPdfs(idCarpetaPdf, nombreArchivoHojaCalculo)`.
