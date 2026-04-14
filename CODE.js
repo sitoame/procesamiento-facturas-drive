@@ -42,7 +42,8 @@ const ESTADO_RESULTADO = {
   OK: 'OK',
   OMITIDO_NO_FISCAL: 'OMITIDO_NO_FISCAL',
   PENDIENTE_VISION: 'PENDIENTE_VISION',
-  ERROR_EXTRACCION: 'ERROR_EXTRACCION'
+  ERROR_EXTRACCION: 'ERROR_EXTRACCION',
+  INCOMPLETO: 'INCOMPLETO'
 };
 
 const METODO_EXTRACCION = {
@@ -196,7 +197,7 @@ function extraerDesdeDGI(contexto) {
       cufe: parsed.cufe || contexto.fileNameNoExt,
       tipoDocumento: TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE,
       metodoExtraccion: METODO_EXTRACCION.DGI,
-      confianza: 0.95,
+      confianza: 0,
       estado: ESTADO_RESULTADO.OK,
       observaciones: ''
     };
@@ -222,7 +223,7 @@ function extraerDesdeTextoEmbebido(contexto) {
       cufe: parsed.cufe,
       tipoDocumento: TIPO_DOCUMENTO.PDF_TEXTO,
       metodoExtraccion: METODO_EXTRACCION.TEXTO,
-      confianza: parsed.cufe ? 0.9 : 0.75,
+      confianza: 0,
       estado: ESTADO_RESULTADO.OK,
       observaciones: parsed.cufe ? '' : 'CUFE no detectado en texto embebido.'
     };
@@ -255,7 +256,7 @@ function normalizarYValidar(resultado, contexto) {
   const total = toNumber(resultado.total);
   const cufe = normalizeSpaces(resultado.cufe || inferirCufeDesdeNombre(contexto.fileNameNoExt));
 
-  return {
+  const normalized = {
     fecha: fecha,
     proveedor: proveedor,
     proveedorNormalizado: proveedorNormalizado,
@@ -268,6 +269,67 @@ function normalizarYValidar(resultado, contexto) {
     estado: resultado.estado || ESTADO_RESULTADO.ERROR_EXTRACCION,
     observaciones: resultado.observaciones || ''
   };
+
+  return evaluarResultado(normalized);
+}
+
+function evaluarResultado(resultado) {
+  if (
+    resultado.estado === ESTADO_RESULTADO.ERROR_EXTRACCION ||
+    resultado.estado === ESTADO_RESULTADO.PENDIENTE_VISION ||
+    resultado.estado === ESTADO_RESULTADO.OMITIDO_NO_FISCAL
+  ) {
+    return resultado;
+  }
+
+  const faltantes = [];
+  const requeridos = getCamposRequeridos(resultado.tipoDocumento);
+
+  for (let i = 0; i < requeridos.length; i++) {
+    const campo = requeridos[i];
+    const val = resultado[campo];
+    const empty = val === '' || val === null || val === undefined;
+    if (empty) faltantes.push(campo.toUpperCase());
+  }
+
+  if (faltantes.length > 0) {
+    resultado.estado = ESTADO_RESULTADO.INCOMPLETO;
+    resultado.confianza = calcularConfianza(resultado, faltantes.length);
+    resultado.observaciones = appendObs(resultado.observaciones, 'Campos faltantes: ' + faltantes.join(', '));
+    return resultado;
+  }
+
+  resultado.estado = ESTADO_RESULTADO.OK;
+  resultado.confianza = calcularConfianza(resultado, 0);
+  return resultado;
+}
+
+function getCamposRequeridos(tipoDocumento) {
+  if (tipoDocumento === TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE) {
+    return ['fecha', 'proveedor', 'total', 'cufe'];
+  }
+
+  if (tipoDocumento === TIPO_DOCUMENTO.PDF_TEXTO) {
+    return ['fecha', 'proveedor', 'total'];
+  }
+
+  return [];
+}
+
+function calcularConfianza(resultado, faltantes) {
+  const base = resultado.metodoExtraccion === METODO_EXTRACCION.DGI ? 0.9 :
+    resultado.metodoExtraccion === METODO_EXTRACCION.TEXTO ? 0.8 : 0.2;
+
+  const penalizacion = faltantes * 0.2;
+  const bonusItbms = resultado.itbms !== '' ? 0.05 : 0;
+  const val = Math.max(0, Math.min(1, base - penalizacion + bonusItbms));
+  return Number(val.toFixed(2));
+}
+
+function appendObs(actual, extra) {
+  if (!actual) return extra;
+  if (!extra) return actual;
+  return actual + ' | ' + extra;
 }
 
 function guardarResultado(resultado, contexto, dataSheet) {
