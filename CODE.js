@@ -181,8 +181,7 @@ function clasificarDocumento(contexto) {
 
 function extraerDesdeDGI(contexto) {
   try {
-    const raw = extractTextFromCufe(contexto.fileNameNoExt);
-    const texto = normalizeRawText(raw);
+    const texto = extractTextFromCufe(contexto.fileNameNoExt);
 
     if (!texto) {
       throw new Error('DGI sin contenido parseable para CUFE.');
@@ -615,13 +614,13 @@ function parseInvoiceData(text) {
     cufe: ''
   };
 
-  const src = normalizeRawText(text);
+  const src = text || '';
 
   const fechaMatch = src.match(/FECHA\s+AUTORIZACI[ÓO]N\s*(\d{2}\/\d{2}\/\d{4})/i) ||
     src.match(/FECHA\s+DE\s+EMISI[ÓO]N\s*:?\s*(\d{2}[\/-]\d{2}[\/-]\d{4})/i);
   if (fechaMatch) data.fecha = fechaMatch[1];
 
-  const proveedorMatch = src.match(/NOMBRE\s+([\s\S]*?)\s+DIRECCI[ÓO]N/i) ||
+  const proveedorMatch = src.match(/NOMBRE([^\n]+)DIRECCI[ÓO]N/i) ||
     src.match(/EMISOR\s*:?\s*([^\n]+)/i);
   if (proveedorMatch) data.proveedor = normalizeSpaces(proveedorMatch[1]);
 
@@ -632,7 +631,7 @@ function parseInvoiceData(text) {
     src.match(/TOTAL\s+A\s+PAGAR\s*:?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)/i);
   if (totalMatch) data.total = normalizeNumberString(totalMatch[1]);
 
-  const cufeMatch = src.match(/\[CUFE\]\s*([A-Z0-9-]{20,})/i) ||
+  const cufeMatch = src.match(/\[CUFE\]\s*([A-Z0-9-]+)PROTOCOLO/i) ||
     src.match(/CUFE\s*:?\s*([A-Z0-9-]{20,})/i);
   if (cufeMatch) data.cufe = cufeMatch[1].trim();
 
@@ -662,28 +661,6 @@ function safeExtractPdfText(fileId) {
   } catch (err) {
     Logger.log('OCR fallback vacío para ' + fileId + ': ' + err.message);
     return '';
-  }
-}
-
-function normalizeRawText(raw) {
-  if (raw === null || raw === undefined) return '';
-  if (typeof raw === 'string') return raw;
-  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
-
-  if (typeof raw.getContentText === 'function') {
-    try {
-      return String(raw.getContentText());
-    } catch (err) {
-      return '';
-    }
-  }
-
-  if (typeof raw.text === 'string') return raw.text;
-
-  try {
-    return JSON.stringify(raw);
-  } catch (err) {
-    return String(raw);
   }
 }
 
