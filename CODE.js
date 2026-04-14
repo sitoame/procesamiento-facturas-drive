@@ -1,105 +1,450 @@
-const NOMBRE_HOJA_DATOS = 'Datos Facturas'; // Nombre de la hoja dentro del archivo de cálculo
-const NOMBRE_HOJA_REGISTRO = 'Archivos Procesados'; // Nombre de la hoja para registrar PDFs ya procesados
+const NOMBRE_HOJA_DATOS = 'Datos Facturas';
+const NOMBRE_HOJA_REGISTRO = 'Archivos Procesados';
+const NOMBRE_HOJA_CARPETAS = 'Carpetas Procesadas';
 
-// --- NOMBRES DE COLUMNAS EN LA HOJA DE CÁLCULO ---
-const ENCABEZADOS_DATOS = ['Fecha', 'Proveedor', 'ITBMS', 'Total', 'CUFE', 'ID Archivo Drive', 'Link'];
+const ENCABEZADOS_DATOS = [
+  'Fecha',
+  'Proveedor',
+  'Proveedor Normalizado',
+  'ITBMS',
+  'Total',
+  'CUFE',
+  'Tipo Documento',
+  'Metodo Extraccion',
+  'Confianza',
+  'Estado',
+  'Observaciones',
+  'ID Archivo Drive',
+  'Link'
+];
+
 const ENCABEZADOS_REGISTRO = ['ID Archivo Drive', 'Nombre Archivo', 'Fecha Procesado'];
 
-// --- FUNCIÓN PRINCIPAL QUE SE EJECUTA CON EL DISPARADOR ---
-function procesarNuevosPdfs(ID_CARPETA_PDF, NOMBRE_ARCHIVO_HOJA_CALCULO) {
-  const folder = DriveApp.getFolderById(ID_CARPETA_PDF);
-  
+const ENCABEZADOS_CARPETAS = [
+  'ID Carpeta',
+  'Nombre',
+  'Parent ID',
+  'Ultima Revision',
+  'Cantidad PDFs',
+  'Cantidad Subcarpetas',
+  'Firma Estado',
+  'Estado'
+];
 
-  const spreadsheet = getOrCreateSpreadsheet(ID_CARPETA_PDF, NOMBRE_ARCHIVO_HOJA_CALCULO, NOMBRE_HOJA_DATOS, ENCABEZADOS_DATOS);
+const TIPO_DOCUMENTO = {
+  FACTURA_ELECTRONICA_CUFE: 'FACTURA_ELECTRONICA_CUFE',
+  PDF_TEXTO: 'PDF_TEXTO',
+  ESCANEO_O_IMAGEN: 'ESCANEO_O_IMAGEN',
+  NO_FISCAL: 'NO_FISCAL'
+};
+
+const ESTADO_RESULTADO = {
+  OK: 'OK',
+  OMITIDO_NO_FISCAL: 'OMITIDO_NO_FISCAL',
+  PENDIENTE_VISION: 'PENDIENTE_VISION',
+  ERROR_EXTRACCION: 'ERROR_EXTRACCION',
+  INCOMPLETO: 'INCOMPLETO'
+};
+
+const METODO_EXTRACCION = {
+  DGI: 'DGI_CUFE',
+  TEXTO: 'TEXTO_EMBEBIDO',
+  VISION: 'VISION_STUB',
+  SKIP: 'SKIP'
+};
+
+const UMBRAL_TEXTO_CORTO = 40;
+
+function procesarNuevosPdfs(ID_CARPETA_PDF, NOMBRE_ARCHIVO_HOJA_CALCULO) {
+  const rootFolder = DriveApp.getFolderById(ID_CARPETA_PDF);
+  const spreadsheet = getOrCreateSpreadsheet(
+    ID_CARPETA_PDF,
+    NOMBRE_ARCHIVO_HOJA_CALCULO,
+    NOMBRE_HOJA_DATOS,
+    ENCABEZADOS_DATOS
+  );
   const dataSheet = spreadsheet.getSheetByName(NOMBRE_HOJA_DATOS);
   const processedLogSheet = getOrCreateProcessedLogSheet(spreadsheet, NOMBRE_HOJA_REGISTRO, ENCABEZADOS_REGISTRO);
+  const folderIndexSheet = getOrCreateFolderIndexSheet(spreadsheet, NOMBRE_HOJA_CARPETAS, ENCABEZADOS_CARPETAS);
 
-  // Obtener los IDs de archivos ya procesados
   const processedFileIds = getProcessedFileIds(processedLogSheet);
+  const folderIndex = getFolderIndex(folderIndexSheet);
+  const carpetasPendientes = listarCarpetasPendientes(rootFolder, folderIndex, folderIndexSheet);
 
-  let newPdfsFound = false;
+  if (carpetasPendientes.length === 0) {
+    Logger.log('Sin cambios en carpetas. No hay trabajo incremental.');
+    return;
+  }
 
-  //const files = folder.getFilesByType(MimeType.PDF);
+  for (let i = 0; i < carpetasPendientes.length; i++) {
+    procesarCarpetaIncremental(
+      carpetasPendientes[i],
+      {
+        dataSheet: dataSheet,
+        processedLogSheet: processedLogSheet,
+        processedFileIds: processedFileIds,
+        folderIndexSheet: folderIndexSheet,
+        folderIndex: folderIndex
+      }
+    );
+  }
+}
 
-  const allPdfs = []; // Array para almacenar todos los archivos PDF encontrados
+function procesarCarpetaIncremental(folder, runtime) {
+  const files = folder.getFilesByType(MimeType.PDF);
+  let procesadosCarpeta = 0;
 
-  //Logger.log(`Iniciando búsqueda de PDFs en la carpeta: ${rootFolder.getName()} (ID: ${rootFolderId})`);
-
-  // Llama a la función recursiva para comenzar la exploración
-  findAllPdfs(folder, allPdfs);
-
-  //while (files.hasNext()) {
-  for (let i = 0; i < allPdfs.length; i++) {
-    const file = allPdfs[i];
-    //const file = files.next();
+  while (files.hasNext()) {
+    const file = files.next();
     const fileId = file.getId();
 
-    // Verificar si el archivo ya ha sido procesado
-    if (processedFileIds.has(fileId)) {
-      //Logger.log(`Archivo ya procesado: ${file.getName()} (${fileId})`);
+    if (runtime.processedFileIds.has(fileId)) {
       continue;
     }
 
-    Logger.log(`Procesando nuevo PDF: ${file.getName()} (${fileId})`);
-    newPdfsFound = true;
+    const contexto = construirContextoArchivo(file);
+    const tipoDocumento = clasificarDocumento(contexto);
+    let resultado;
 
-    let invoiceData;
-
-    try {
-      //const pdfText = extractTextFromPdf(fileId);
-      const pdfText = extractTextFromCufe(file.getName().slice(0, -4));
-      invoiceData = parseInvoiceData(pdfText);
-      //Logger.log({invoiceData});
-      /*if (NOMBRE_ARCHIVO_HOJA_CALCULO === 'Facturas FONDOS COMERCIALES'){
-        invoiceData = parseInvoiceData_FONDOS(pdfText);
-      }
-      else if (NOMBRE_ARCHIVO_HOJA_CALCULO === 'Facturas PROSERV') {
-        invoiceData = parseInvoiceData_PROSERV(pdfText);
-      }
-      else {
-        invoiceData = parseInvoiceData(pdfText);
-      }*/
-      
-      // Verificar si la factura está repetida por CUFE
-      if (isDuplicateInvoice(dataSheet, invoiceData.cufe, fileId)) {
-        Logger.log(`Factura duplicada (CUFE o ID de archivo): ${invoiceData.cufe || 'N/A'} - ${file.getName()}`);
-        // Registrar el archivo como procesado aunque sea duplicado para evitar re-chequeo
-        processedLogSheet.appendRow([fileId, file.getName(), new Date()]);
-        continue;
-      }
-
-      // Añadir ID de archivo de Drive a los datos
-      invoiceData.driveFileId = fileId;
-
-      // Añadir link del archivo
-      invoiceData.link = file.getUrl();
-
-      // Formatear los datos para la fila de la hoja de cálculo
-      const rowData = [
-        invoiceData.fecha,
-        invoiceData.proveedor,
-        invoiceData.itbms,
-        invoiceData.total,
-        invoiceData.cufe,
-        invoiceData.driveFileId,
-        invoiceData.link
-      ];
-
-      dataSheet.appendRow(rowData);
-      Logger.log(`Datos ingresados para ${file.getName()}`);
-
-      // Registrar el archivo como procesado
-      processedLogSheet.appendRow([fileId, file.getName(), new Date()]);
-
-    } catch (e) {
-      Logger.log(`Error al procesar ${file.getName()} (${fileId}): ${e.message}`);
-      // Opcional: mover el archivo a una carpeta de errores o enviar notificación
+    if (tipoDocumento === TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE) {
+      resultado = extraerDesdeDGI(contexto);
+    } else if (tipoDocumento === TIPO_DOCUMENTO.PDF_TEXTO) {
+      resultado = extraerDesdeTextoEmbebido(contexto);
+    } else if (tipoDocumento === TIPO_DOCUMENTO.ESCANEO_O_IMAGEN) {
+      resultado = extraerDesdeVision(contexto);
+    } else {
+      resultado = {
+        tipoDocumento: TIPO_DOCUMENTO.NO_FISCAL,
+        metodoExtraccion: METODO_EXTRACCION.SKIP,
+        confianza: 1,
+        estado: ESTADO_RESULTADO.OMITIDO_NO_FISCAL,
+        observaciones: 'Documento no fiscal detectado por clasificación.'
+      };
     }
+
+    const normalizado = normalizarYValidar(resultado, contexto);
+
+    if (!isDuplicateInvoice(runtime.dataSheet, normalizado.cufe, fileId)) {
+      guardarResultado(normalizado, contexto, runtime.dataSheet);
+    } else {
+      Logger.log('Duplicado detectado: ' + file.getName() + ' (' + fileId + ')');
+    }
+
+    runtime.processedLogSheet.appendRow([fileId, file.getName(), new Date()]);
+    runtime.processedFileIds.add(fileId);
+    procesadosCarpeta++;
   }
 
-  if (!newPdfsFound) {
-    Logger.log('No se encontraron nuevos PDFs para procesar.');
+  const estado = construirEstadoCarpeta(folder);
+  upsertFolderIndex(runtime.folderIndexSheet, runtime.folderIndex, estado, 'PROCESADA');
+  Logger.log('Carpeta procesada: ' + folder.getName() + ' | PDFs nuevos: ' + procesadosCarpeta);
+}
+
+function construirContextoArchivo(file) {
+  const nombre = file.getName();
+  const nombreSinExtension = nombre.replace(/\.pdf$/i, '');
+  const textoOCR = safeExtractPdfText(file.getId());
+
+  return {
+    fileId: file.getId(),
+    fileName: nombre,
+    fileNameNoExt: nombreSinExtension,
+    fileUrl: file.getUrl(),
+    mimeType: file.getMimeType(),
+    lastUpdated: file.getLastUpdated(),
+    textoOCR: textoOCR,
+    textoOCRLen: textoOCR ? textoOCR.trim().length : 0
+  };
+}
+
+function clasificarDocumento(contexto) {
+  if (/^FE[A-Z0-9-]{20,}$/i.test(contexto.fileNameNoExt)) {
+    return TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE;
   }
+
+  const txt = (contexto.textoOCR || '').toUpperCase();
+
+  if (/ORDEN DE PEDIDO|PROFORMA|COTIZACI[ÓO]N/.test(txt)) {
+    return TIPO_DOCUMENTO.NO_FISCAL;
+  }
+
+  if (/FECHA DE EMISI[ÓO]N|CUFE|ITBMS/.test(txt)) {
+    return TIPO_DOCUMENTO.PDF_TEXTO;
+  }
+
+  if (contexto.textoOCRLen < UMBRAL_TEXTO_CORTO) {
+    return TIPO_DOCUMENTO.ESCANEO_O_IMAGEN;
+  }
+
+  return TIPO_DOCUMENTO.PDF_TEXTO;
+}
+
+function extraerDesdeDGI(contexto) {
+  try {
+    const raw = extractTextFromCufe(contexto.fileNameNoExt);
+    const texto = normalizeRawText(raw);
+
+    if (!texto) {
+      throw new Error('DGI sin contenido parseable para CUFE.');
+    }
+
+    const parsed = parseInvoiceData(texto);
+    return {
+      fecha: parsed.fecha,
+      proveedor: parsed.proveedor,
+      itbms: parsed.itbms,
+      total: parsed.total,
+      cufe: parsed.cufe || contexto.fileNameNoExt,
+      tipoDocumento: TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE,
+      metodoExtraccion: METODO_EXTRACCION.DGI,
+      confianza: 0,
+      estado: ESTADO_RESULTADO.OK,
+      observaciones: ''
+    };
+  } catch (err) {
+    return {
+      tipoDocumento: TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE,
+      metodoExtraccion: METODO_EXTRACCION.DGI,
+      confianza: 0,
+      estado: ESTADO_RESULTADO.ERROR_EXTRACCION,
+      observaciones: 'Error DGI: ' + err.message
+    };
+  }
+}
+
+function extraerDesdeTextoEmbebido(contexto) {
+  try {
+    const parsed = parseInvoiceData(contexto.textoOCR || '');
+    return {
+      fecha: parsed.fecha,
+      proveedor: parsed.proveedor,
+      itbms: parsed.itbms,
+      total: parsed.total,
+      cufe: parsed.cufe,
+      tipoDocumento: TIPO_DOCUMENTO.PDF_TEXTO,
+      metodoExtraccion: METODO_EXTRACCION.TEXTO,
+      confianza: 0,
+      estado: ESTADO_RESULTADO.OK,
+      observaciones: parsed.cufe ? '' : 'CUFE no detectado en texto embebido.'
+    };
+  } catch (err) {
+    return {
+      tipoDocumento: TIPO_DOCUMENTO.PDF_TEXTO,
+      metodoExtraccion: METODO_EXTRACCION.TEXTO,
+      confianza: 0,
+      estado: ESTADO_RESULTADO.ERROR_EXTRACCION,
+      observaciones: 'Error texto embebido: ' + err.message
+    };
+  }
+}
+
+function extraerDesdeVision(contexto) {
+  return {
+    tipoDocumento: TIPO_DOCUMENTO.ESCANEO_O_IMAGEN,
+    metodoExtraccion: METODO_EXTRACCION.VISION,
+    confianza: 0.2,
+    estado: ESTADO_RESULTADO.PENDIENTE_VISION,
+    observaciones: 'Stub Vision: integrar OCR avanzado/AI para escaneos.'
+  };
+}
+
+function normalizarYValidar(resultado, contexto) {
+  const fecha = normalizeDate(resultado.fecha);
+  const proveedor = normalizeSpaces(resultado.proveedor || '');
+  const proveedorNormalizado = normalizeProvider(proveedor);
+  const itbms = toNumber(resultado.itbms);
+  const total = toNumber(resultado.total);
+  const cufe = normalizeSpaces(resultado.cufe || inferirCufeDesdeNombre(contexto.fileNameNoExt));
+
+  const normalized = {
+    fecha: fecha,
+    proveedor: proveedor,
+    proveedorNormalizado: proveedorNormalizado,
+    itbms: itbms,
+    total: total,
+    cufe: cufe,
+    tipoDocumento: resultado.tipoDocumento || TIPO_DOCUMENTO.PDF_TEXTO,
+    metodoExtraccion: resultado.metodoExtraccion || METODO_EXTRACCION.TEXTO,
+    confianza: typeof resultado.confianza === 'number' ? resultado.confianza : 0,
+    estado: resultado.estado || ESTADO_RESULTADO.ERROR_EXTRACCION,
+    observaciones: resultado.observaciones || ''
+  };
+
+  return evaluarResultado(normalized);
+}
+
+function evaluarResultado(resultado) {
+  if (
+    resultado.estado === ESTADO_RESULTADO.ERROR_EXTRACCION ||
+    resultado.estado === ESTADO_RESULTADO.PENDIENTE_VISION ||
+    resultado.estado === ESTADO_RESULTADO.OMITIDO_NO_FISCAL
+  ) {
+    return resultado;
+  }
+
+  const faltantes = [];
+  const requeridos = getCamposRequeridos(resultado.tipoDocumento);
+
+  for (let i = 0; i < requeridos.length; i++) {
+    const campo = requeridos[i];
+    const val = resultado[campo];
+    const empty = val === '' || val === null || val === undefined;
+    if (empty) faltantes.push(campo.toUpperCase());
+  }
+
+  if (faltantes.length > 0) {
+    resultado.estado = ESTADO_RESULTADO.INCOMPLETO;
+    resultado.confianza = calcularConfianza(resultado, faltantes.length);
+    resultado.observaciones = appendObs(resultado.observaciones, 'Campos faltantes: ' + faltantes.join(', '));
+    return resultado;
+  }
+
+  resultado.estado = ESTADO_RESULTADO.OK;
+  resultado.confianza = calcularConfianza(resultado, 0);
+  return resultado;
+}
+
+function getCamposRequeridos(tipoDocumento) {
+  if (tipoDocumento === TIPO_DOCUMENTO.FACTURA_ELECTRONICA_CUFE) {
+    return ['fecha', 'proveedor', 'total', 'cufe'];
+  }
+
+  if (tipoDocumento === TIPO_DOCUMENTO.PDF_TEXTO) {
+    return ['fecha', 'proveedor', 'total'];
+  }
+
+  return [];
+}
+
+function calcularConfianza(resultado, faltantes) {
+  const base = resultado.metodoExtraccion === METODO_EXTRACCION.DGI ? 0.9 :
+    resultado.metodoExtraccion === METODO_EXTRACCION.TEXTO ? 0.8 : 0.2;
+
+  const penalizacion = faltantes * 0.2;
+  const bonusItbms = resultado.itbms !== '' ? 0.05 : 0;
+  const val = Math.max(0, Math.min(1, base - penalizacion + bonusItbms));
+  return Number(val.toFixed(2));
+}
+
+function appendObs(actual, extra) {
+  if (!actual) return extra;
+  if (!extra) return actual;
+  return actual + ' | ' + extra;
+}
+
+function guardarResultado(resultado, contexto, dataSheet) {
+  dataSheet.appendRow([
+    resultado.fecha,
+    resultado.proveedor,
+    resultado.proveedorNormalizado,
+    resultado.itbms,
+    resultado.total,
+    resultado.cufe,
+    resultado.tipoDocumento,
+    resultado.metodoExtraccion,
+    resultado.confianza,
+    resultado.estado,
+    resultado.observaciones,
+    contexto.fileId,
+    contexto.fileUrl
+  ]);
+}
+
+function construirEstadoCarpeta(folder) {
+  const parent = folder.getParents();
+  const parentId = parent.hasNext() ? parent.next().getId() : '';
+  const pdfInfo = getPdfCountAndIds(folder);
+  const subInfo = getSubfolderCountAndIds(folder);
+  const firma = calcularFirmaCarpeta(folder, pdfInfo.ids, subInfo.ids);
+
+  return {
+    folderId: folder.getId(),
+    nombre: folder.getName(),
+    parentId: parentId,
+    ultimaRevision: new Date(),
+    cantidadPdfs: pdfInfo.count,
+    cantidadSubcarpetas: subInfo.count,
+    firmaEstado: firma,
+    estado: 'PENDIENTE'
+  };
+}
+
+function calcularFirmaCarpeta(folder, pdfIdsOpt, subfolderIdsOpt) {
+  const pdfIds = pdfIdsOpt || getPdfCountAndIds(folder).ids;
+  const subIds = subfolderIdsOpt || getSubfolderCountAndIds(folder).ids;
+  const lastUpdated = safeDate(folder.getLastUpdated());
+
+  return [
+    folder.getId(),
+    lastUpdated,
+    pdfIds.length,
+    subIds.length,
+    pdfIds.join('|'),
+    subIds.join('|')
+  ].join('::');
+}
+
+function carpetaCambio(folder, folderIndex) {
+  const estadoActual = construirEstadoCarpeta(folder);
+  const previo = folderIndex[estadoActual.folderId];
+
+  if (!previo) {
+    return { cambio: true, estadoActual: estadoActual };
+  }
+
+  const cambio =
+    String(previo.cantidadPdfs) !== String(estadoActual.cantidadPdfs) ||
+    String(previo.cantidadSubcarpetas) !== String(estadoActual.cantidadSubcarpetas) ||
+    String(previo.firmaEstado) !== String(estadoActual.firmaEstado);
+
+  return { cambio: cambio, estadoActual: estadoActual };
+}
+
+function listarCarpetasPendientes(rootFolder, folderIndex, folderIndexSheet) {
+  const pendientes = [];
+
+  function walk(folder, forceScanChildren) {
+    const check = carpetaCambio(folder, folderIndex);
+    const hasChange = forceScanChildren || check.cambio;
+
+    if (hasChange) {
+      pendientes.push(folder);
+      const subfolders = folder.getFolders();
+      while (subfolders.hasNext()) {
+        walk(subfolders.next(), true);
+      }
+      return;
+    }
+
+    upsertFolderIndex(folderIndexSheet, folderIndex, check.estadoActual, 'SIN_CAMBIOS');
+  }
+
+  walk(rootFolder, false);
+  return pendientes;
+}
+
+function getPdfCountAndIds(folder) {
+  const files = folder.getFilesByType(MimeType.PDF);
+  const ids = [];
+
+  while (files.hasNext()) {
+    ids.push(files.next().getId());
+  }
+
+  ids.sort();
+  return { count: ids.length, ids: ids };
+}
+
+function getSubfolderCountAndIds(folder) {
+  const subfolders = folder.getFolders();
+  const ids = [];
+
+  while (subfolders.hasNext()) {
+    ids.push(subfolders.next().getId());
+  }
+
+  ids.sort();
+  return { count: ids.length, ids: ids };
 }
 
 function getOrCreateSpreadsheet(folderId, sheetName, tabName, headers) {
@@ -109,29 +454,23 @@ function getOrCreateSpreadsheet(folderId, sheetName, tabName, headers) {
 
   if (files.hasNext()) {
     spreadsheet = SpreadsheetApp.open(files.next());
-    Logger.log(`Hoja de cálculo existente encontrada: ${sheetName}`);
   } else {
     spreadsheet = SpreadsheetApp.create(sheetName);
     DriveApp.getFileById(spreadsheet.getId()).moveTo(folder);
-    Logger.log(`Nueva hoja de cálculo creada: ${sheetName}`);
   }
 
-  // Asegurarse de que la pestaña de datos exista y tenga los encabezados
   let dataSheet = spreadsheet.getSheetByName(tabName);
   if (!dataSheet) {
     dataSheet = spreadsheet.insertSheet(tabName);
-    // Eliminar la hoja por defecto si no es la única
     if (spreadsheet.getSheets().length > 1 && spreadsheet.getSheets()[0].getName() === 'Hoja 1') {
       spreadsheet.deleteSheet(spreadsheet.getSheets()[0]);
     }
-    Logger.log(`Pestaña '${tabName}' creada.`);
   }
 
-  // Escribir encabezados si la hoja está vacía
   if (dataSheet.getLastRow() === 0) {
     dataSheet.appendRow(headers);
-    Logger.log(`Encabezados escritos en '${tabName}'.`);
   }
+
   return spreadsheet;
 }
 
@@ -139,56 +478,132 @@ function getOrCreateProcessedLogSheet(spreadsheet, tabName, headers) {
   let logSheet = spreadsheet.getSheetByName(tabName);
   if (!logSheet) {
     logSheet = spreadsheet.insertSheet(tabName);
-    Logger.log(`Pestaña de registro '${tabName}' creada.`);
   }
   if (logSheet.getLastRow() === 0) {
     logSheet.appendRow(headers);
-    Logger.log(`Encabezados escritos en '${tabName}'.`);
   }
   return logSheet;
+}
+
+function getOrCreateFolderIndexSheet(spreadsheet, tabName, headers) {
+  let sheet = spreadsheet.getSheetByName(tabName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(tabName);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(headers);
+  }
+  return sheet;
+}
+
+function getFolderIndex(folderIndexSheet) {
+  const map = {};
+  const lastRow = folderIndexSheet.getLastRow();
+
+  if (lastRow <= 1) {
+    return map;
+  }
+
+  const values = folderIndexSheet.getRange(2, 1, lastRow - 1, ENCABEZADOS_CARPETAS.length).getValues();
+
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const folderId = row[0];
+    if (!folderId) continue;
+
+    map[folderId] = {
+      rowNumber: i + 2,
+      folderId: row[0],
+      nombre: row[1],
+      parentId: row[2],
+      ultimaRevision: row[3],
+      cantidadPdfs: row[4],
+      cantidadSubcarpetas: row[5],
+      firmaEstado: row[6],
+      estado: row[7]
+    };
+  }
+
+  return map;
+}
+
+function upsertFolderIndex(folderIndexSheet, folderIndex, estado, status) {
+  const rowData = [
+    estado.folderId,
+    estado.nombre,
+    estado.parentId,
+    estado.ultimaRevision,
+    estado.cantidadPdfs,
+    estado.cantidadSubcarpetas,
+    estado.firmaEstado,
+    status
+  ];
+
+  const previo = folderIndex[estado.folderId];
+
+  if (previo && previo.rowNumber) {
+    folderIndexSheet.getRange(previo.rowNumber, 1, 1, rowData.length).setValues([rowData]);
+    folderIndex[estado.folderId] = {
+      rowNumber: previo.rowNumber,
+      folderId: estado.folderId,
+      nombre: estado.nombre,
+      parentId: estado.parentId,
+      ultimaRevision: estado.ultimaRevision,
+      cantidadPdfs: estado.cantidadPdfs,
+      cantidadSubcarpetas: estado.cantidadSubcarpetas,
+      firmaEstado: estado.firmaEstado,
+      estado: status
+    };
+  } else {
+    folderIndexSheet.appendRow(rowData);
+    folderIndex[estado.folderId] = {
+      rowNumber: folderIndexSheet.getLastRow(),
+      folderId: estado.folderId,
+      nombre: estado.nombre,
+      parentId: estado.parentId,
+      ultimaRevision: estado.ultimaRevision,
+      cantidadPdfs: estado.cantidadPdfs,
+      cantidadSubcarpetas: estado.cantidadSubcarpetas,
+      firmaEstado: estado.firmaEstado,
+      estado: status
+    };
+  }
 }
 
 function getProcessedFileIds(processedLogSheet) {
   const fileIds = new Set();
   const lastRow = processedLogSheet.getLastRow();
-  if (lastRow > 1) { // Ignorar la fila de encabezados
-    const range = processedLogSheet.getRange(2, 1, lastRow - 1, 1);
-    const values = range.getValues();
-    values.forEach(row => fileIds.add(row[0]));
+
+  if (lastRow <= 1) {
+    return fileIds;
   }
+
+  const values = processedLogSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (let i = 0; i < values.length; i++) {
+    fileIds.add(values[i][0]);
+  }
+
   return fileIds;
 }
 
 function extractTextFromPdf(fileId) {
   const pdfFile = DriveApp.getFileById(fileId);
-  const pdfBlob = pdfFile.getBlob();
-
-  // --- INICIO DE MODIFICACIÓN ---
-  const fileMimeType = pdfFile.getMimeType();
-  Logger.log(`Procesando archivo: ${pdfFile.getName()} (ID: ${fileId}) con MIME Type: ${fileMimeType}`);
-
-  // Asegurarse de que el archivo es realmente un PDF antes de intentar OCR
-  if (fileMimeType !== MimeType.PDF) {
-    throw new Error(`El archivo ${pdfFile.getName()} (ID: ${fileId}) no es un PDF. Su tipo es: ${fileMimeType}. No se puede realizar OCR.`);
+  if (pdfFile.getMimeType() !== MimeType.PDF) {
+    throw new Error('Archivo no PDF: ' + pdfFile.getName());
   }
 
-  const tempDoc = Drive.Files.create({
-    title: pdfFile.getName() + '_temp_ocr',
-    mimeType: MimeType.GOOGLE_DOCS
-  }, pdfBlob.setContentType(MimeType.PDF), { // <--- MODIFICACIÓN AQUÍ
-    ocr: true,
-    ocrLanguage: 'es'
-  });
+  const tempDoc = Drive.Files.create(
+    {
+      title: pdfFile.getName() + '_tmp_ocr',
+      mimeType: MimeType.GOOGLE_DOCS
+    },
+    pdfFile.getBlob().setContentType(MimeType.PDF),
+    { ocr: true, ocrLanguage: 'es' }
+  );
 
-  // Extraer el texto del documento temporal
-  const docContent = DocumentApp.openById(tempDoc.id).getBody().getText();
-
-  //Logger.log({docContent});
-
-  // Eliminar el documento temporal
+  const text = DocumentApp.openById(tempDoc.id).getBody().getText();
   Drive.Files.remove(tempDoc.id);
-
-  return docContent;
+  return text;
 }
 
 function parseInvoiceData(text) {
@@ -200,77 +615,125 @@ function parseInvoiceData(text) {
     cufe: ''
   };
 
-  // --- EJEMPLOS DE EXPRESIONES REGULARES (NECESITAN PERSONALIZACIÓN) ---
-  // Estos son solo ejemplos. Debes ajustarlos a la estructura real de tus PDFs.
+  const src = normalizeRawText(text);
 
-  // Ejemplo para Fecha (dd/mm/aaaa o dd-mm-aaaa)
-  const fechaMatch = text.match(/FECHA AUTORIZACIÓN(\d{2}\/\d{2}\/\d{4})/i);
-  if (fechaMatch) {
-    data.fecha = fechaMatch[1];
-  }
+  const fechaMatch = src.match(/FECHA\s+AUTORIZACI[ÓO]N\s*(\d{2}\/\d{2}\/\d{4})/i) ||
+    src.match(/FECHA\s+DE\s+EMISI[ÓO]N\s*:?\s*(\d{2}[\/-]\d{2}[\/-]\d{4})/i);
+  if (fechaMatch) data.fecha = fechaMatch[1];
 
-  // Ejemplo para Proveedor (buscar "Proveedor:" seguido de texto)
-  const proveedorMatch = text.match(/NOMBRE([^\n]+)DIRECCIÓN/i);
-  if (proveedorMatch) {
-    data.proveedor = proveedorMatch[1].trim();
-  }
+  const proveedorMatch = src.match(/NOMBRE\s+([\s\S]*?)\s+DIRECCI[ÓO]N/i) ||
+    src.match(/EMISOR\s*:?\s*([^\n]+)/i);
+  if (proveedorMatch) data.proveedor = normalizeSpaces(proveedorMatch[1]);
 
-  // Ejemplo para ITBMS (buscar "ITBMS:" o "IVA:" seguido de un número con decimales)
-  const itbmsMatch = text.match(/ITBMS Total:\s*(\d{1,6}(?:,\d{3})*(?:\.\d+)?)/i);
-  if (itbmsMatch) {
-    data.itbms = parseFloat(itbmsMatch[1].replace(',', '.')); // Convertir a número flotante
-  }
+  const itbmsMatch = src.match(/ITBMS\s*(?:TOTAL)?\s*:?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)/i);
+  if (itbmsMatch) data.itbms = normalizeNumberString(itbmsMatch[1]);
 
-  // Ejemplo para Total (buscar "Total:" o "Monto Total:" seguido de un número con decimales)
-  const totalMatch = text.match(/Valor Total:\s*(\d{1,6}(?:,\d{3})*(?:\.\d+)?)/i);
-  if (totalMatch) {
-    data.total = parseFloat(totalMatch[1].replace(',', '.')); // Convertir a número flotante
-  }
+  const totalMatch = src.match(/VALOR\s+TOTAL\s*:?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)/i) ||
+    src.match(/TOTAL\s+A\s+PAGAR\s*:?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)/i);
+  if (totalMatch) data.total = normalizeNumberString(totalMatch[1]);
 
-  // Ejemplo para CUFE (Código Único de Factura Electrónica - formato específico, por ejemplo, alfanumérico largo)
-  // Este es un ejemplo genérico, el CUFE puede tener un patrón muy específico.
-  const cufeMatch = text.match(/\[CUFE\]\s*([A-Z0-9-]+)PROTOCOLO/i); // Ajusta el patrón según el formato real del CUFE
-  if (cufeMatch) {
-    data.cufe = cufeMatch[1].trim();
-  }
-  Logger.log({data});
+  const cufeMatch = src.match(/\[CUFE\]\s*([A-Z0-9-]{20,})/i) ||
+    src.match(/CUFE\s*:?\s*([A-Z0-9-]{20,})/i);
+  if (cufeMatch) data.cufe = cufeMatch[1].trim();
+
   return data;
 }
 
 function isDuplicateInvoice(sheet, cufe, driveFileId) {
   const lastRow = sheet.getLastRow();
-  if (lastRow <= 1) return false; // Solo encabezados o vacía
+  if (lastRow <= 1) return false;
 
-  const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
-  const values = range.getValues();
-
+  const values = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
   for (let i = 0; i < values.length; i++) {
-    const row = values[i];
-    const existingCufe = row[4]; // Columna del CUFE (índice 4 para la 5ta columna)
-    const existingDriveFileId = row[5]; // Columna del ID de Archivo Drive (índice 5 para la 6ta columna)
+    const existingCufe = values[i][5];
+    const existingDriveFileId = values[i][11];
 
-    // Considerar duplicado si el CUFE coincide O el ID de archivo de Drive coincide
     if ((cufe && existingCufe === cufe) || existingDriveFileId === driveFileId) {
       return true;
     }
   }
+
   return false;
 }
 
-function findAllPdfs(folder, pdfFilesArray) {
-  // 1. Obtener archivos PDF directamente en esta carpeta
-  const files = folder.getFilesByType(MimeType.PDF);
-  while (files.hasNext()) {
-    const file = files.next();
-    pdfFilesArray.push(file);
-    // Logger.log(`Encontrado PDF: ${file.getName()} en ${folder.getName()}`);
+function safeExtractPdfText(fileId) {
+  try {
+    return extractTextFromPdf(fileId);
+  } catch (err) {
+    Logger.log('OCR fallback vacío para ' + fileId + ': ' + err.message);
+    return '';
+  }
+}
+
+function normalizeRawText(raw) {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+
+  if (typeof raw.getContentText === 'function') {
+    try {
+      return String(raw.getContentText());
+    } catch (err) {
+      return '';
+    }
   }
 
-  // 2. Obtener subcarpetas y llamarse a sí misma para cada una
-  const subFolders = folder.getFolders();
-  while (subFolders.hasNext()) {
-    const subFolder = subFolders.next();
-    // Llamada recursiva: explora la subcarpeta
-    findAllPdfs(subFolder, pdfFilesArray);
+  if (typeof raw.text === 'string') return raw.text;
+
+  try {
+    return JSON.stringify(raw);
+  } catch (err) {
+    return String(raw);
   }
+}
+
+function normalizeProvider(proveedor) {
+  const normalized = proveedor
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized;
+}
+
+function normalizeNumberString(raw) {
+  const clean = String(raw).replace(/\s+/g, '');
+  const normalized = clean.indexOf(',') > -1 && clean.indexOf('.') > -1
+    ? clean.replace(/\./g, '').replace(',', '.')
+    : clean.replace(',', '.');
+  return parseFloat(normalized);
+}
+
+function toNumber(value) {
+  if (typeof value === 'number') return value;
+  if (!value) return '';
+  const num = normalizeNumberString(value);
+  return isNaN(num) ? '' : num;
+}
+
+function normalizeDate(dateValue) {
+  if (!dateValue) return '';
+  if (Object.prototype.toString.call(dateValue) === '[object Date]') return dateValue;
+  const match = String(dateValue).match(/^(\d{2})[\/-](\d{2})[\/-](\d{4})$/);
+  if (!match) return dateValue;
+  return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+}
+
+function normalizeSpaces(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function inferirCufeDesdeNombre(fileNameNoExt) {
+  return /^FE[A-Z0-9-]{20,}$/i.test(fileNameNoExt) ? fileNameNoExt : '';
+}
+
+function safeDate(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd\'T\'HH:mm:ss');
+  }
+  return String(value);
 }
