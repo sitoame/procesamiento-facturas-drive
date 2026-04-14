@@ -180,8 +180,14 @@ function clasificarDocumento(contexto) {
 
 function extraerDesdeDGI(contexto) {
   try {
-    const texto = extractTextFromCufe(contexto.fileNameNoExt);
-    const parsed = parseInvoiceData(texto || '');
+    const raw = extractTextFromCufe(contexto.fileNameNoExt);
+    const texto = normalizeRawText(raw);
+
+    if (!texto) {
+      throw new Error('DGI sin contenido parseable para CUFE.');
+    }
+
+    const parsed = parseInvoiceData(texto);
     return {
       fecha: parsed.fecha,
       proveedor: parsed.proveedor,
@@ -547,7 +553,7 @@ function parseInvoiceData(text) {
     cufe: ''
   };
 
-  const src = text || '';
+  const src = normalizeRawText(text);
 
   const fechaMatch = src.match(/FECHA\s+AUTORIZACI[ÓO]N\s*(\d{2}\/\d{2}\/\d{4})/i) ||
     src.match(/FECHA\s+DE\s+EMISI[ÓO]N\s*:?\s*(\d{2}[\/-]\d{2}[\/-]\d{4})/i);
@@ -594,6 +600,28 @@ function safeExtractPdfText(fileId) {
   } catch (err) {
     Logger.log('OCR fallback vacío para ' + fileId + ': ' + err.message);
     return '';
+  }
+}
+
+function normalizeRawText(raw) {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
+
+  if (typeof raw.getContentText === 'function') {
+    try {
+      return String(raw.getContentText());
+    } catch (err) {
+      return '';
+    }
+  }
+
+  if (typeof raw.text === 'string') return raw.text;
+
+  try {
+    return JSON.stringify(raw);
+  } catch (err) {
+    return String(raw);
   }
 }
 
